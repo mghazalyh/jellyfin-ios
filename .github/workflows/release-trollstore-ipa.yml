@@ -1,0 +1,107 @@
+name: Release TrollStore IPA
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trollstore-ipa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build unsigned IPA and publish GitHub Release
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Ruby and Bundler
+        uses: ruby/setup-ruby@be3c7df29b3349ec6bcfc6b4792f1cf9f5237d18 # v1.343.0
+        with:
+          bundler-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci --no-audit
+
+      - name: Install iOS CocoaPods dependencies
+        run: bundle exec pod install --project-directory=ios --deployment
+
+      - name: Build iOS app without Apple signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace ios/Jellyfin.xcworkspace \
+            -scheme Jellyfin \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/JellyfinDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build
+
+      - name: Package unsigned IPA for TrollStore
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/JellyfinDerivedData/Build/Products/Release-iphoneos/Jellyfin.app"
+          test -d "$APP_PATH"
+          test -f "$APP_PATH/Info.plist"
+
+          VERSION="$(jq -r '.expo.version' app.json)"
+          BUILD_NUMBER="$(jq -r '.expo.ios.buildNumber' app.json)"
+          test -n "$VERSION"
+          test -n "$BUILD_NUMBER"
+          test "$VERSION" != "null"
+          test "$BUILD_NUMBER" != "null"
+
+          RELEASE_TAG="trollstore-v${BUILD_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          IPA_NAME="Jellyfin-${BUILD_NUMBER}-unsigned.ipa"
+
+          mkdir -p "$GITHUB_WORKSPACE/release/Payload"
+          ditto "$APP_PATH" "$GITHUB_WORKSPACE/release/Payload/Jellyfin.app"
+          (
+            cd "$GITHUB_WORKSPACE/release"
+            /usr/bin/zip -qry "$IPA_NAME" Payload
+          )
+          test -s "$GITHUB_WORKSPACE/release/$IPA_NAME"
+          /usr/bin/unzip -Z1 "$GITHUB_WORKSPACE/release/$IPA_NAME" | grep -qx 'Payload/Jellyfin.app/Info.plist'
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "ipa_path=release/$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Publish IPA as GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+          BUILD_NUMBER: ${{ steps.package.outputs.build_number }}
+          IPA_PATH: ${{ steps.package.outputs.ipa_path }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" "$IPA_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Jellyfin $VERSION ($BUILD_NUMBER) - TrollStore IPA" \
+            --notes "Unsigned iOS IPA for TrollStore. No Apple Developer account, certificate, or provisioning profile required. Install through TrollStore with ldid installed."

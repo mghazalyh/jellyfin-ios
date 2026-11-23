@@ -35,7 +35,7 @@ REF = "mghazalyh/JellyFin-PS3 v3.6.5-surf.1"
 class Ps3Lab:
     def __init__(self, root):
         self.root = root
-        root.title("Jellyfin PS3 Lab for Windows")
+        root.title("Jellyfin PS3 Stream")
         root.geometry("1060x770")
         self.server = tk.StringVar()
         self.catalog = tk.StringVar()
@@ -342,7 +342,7 @@ class Ps3Lab:
             return
         mpv = self.find_mpv()
         if not mpv:
-            self.status.set("No mpv.exe found. Use Probe or install portable mpv.")
+            self.status.set("mpv player unavailable. The packaged build includes it.")
             self.stop()
             return
         try:
@@ -392,8 +392,19 @@ class Ps3Lab:
     def find_mpv():
         paths = []
         if getattr(sys, "frozen", False):
-            paths.append(Path(sys.executable).parent / "mpv" / "mpv.exe")
-        paths.append(Path(__file__).resolve().parent / "mpv" / "mpv.exe")
+            app_executable = Path(sys.executable)
+            if sys.platform == "darwin":
+                paths.append(app_executable.parent.parent / "Resources" / "mpv.app" /
+                             "Contents" / "MacOS" / "mpv")
+                paths.append(app_executable.parent / "mpv")
+            else:
+                paths.append(app_executable.parent / "mpv" / "mpv.exe")
+        package_dir = Path(__file__).resolve().parent
+        if sys.platform == "darwin":
+            paths.append(package_dir / "mpv.app" / "Contents" / "MacOS" / "mpv")
+            paths.append(package_dir / "mpv" / "mpv")
+        else:
+            paths.append(package_dir / "mpv" / "mpv.exe")
         from_path = shutil.which("mpv")
         if from_path:
             paths.append(Path(from_path))
@@ -623,17 +634,24 @@ class Ps3Lab:
             self.log.configure(state="disabled")
 
     def choose_rpc(self):
-        p = filedialog.askopenfilename(filetypes=[("Windows executable", "*.exe")])
+        p = (filedialog.askdirectory(title="Select RPCS3.app") if sys.platform == "darwin"
+             else filedialog.askopenfilename(filetypes=[("Windows executable", "*.exe")]))
         if p:
             self.rpc_path.set(p)
 
     def start_rpc(self):
         p = Path(self.rpc_path.get())
-        if not p.is_file():
-            messagebox.showwarning("RPCS3", "Select your RPCS3.exe first")
+        if not (p.is_file() or (sys.platform == "darwin" and
+                                p.is_dir() and p.suffix == ".app")):
+            messagebox.showwarning("RPCS3", "Select an RPCS3 executable or .app")
             return
         try:
-            subprocess.Popen([str(p)], cwd=str(p.parent))
+            if sys.platform == "darwin" and p.is_dir():
+                subprocess.Popen(["/usr/bin/open", "-a", str(p)],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen([str(p)], cwd=str(p.parent))
             self.emit("rpcs3_launched", {"external": True})
         except OSError as ex:
             self.emit("rpcs3_error", {"type": type(ex).__name__})

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import tkinter as tk
+import sys
 from tkinter import messagebox, ttk
 
 from .theater import (
@@ -90,6 +91,14 @@ class CinematicUI(TheaterUI):
         screen.pack(fill="both", expand=True)
         self.video_host = tk.Frame(screen, bg="#000000")
         self.video_host.pack(fill="both", expand=True)
+        if sys.platform == "darwin":
+            tk.Label(
+                self.video_host,
+                text="▶\n\nVideo plays in a native macOS mpv window.\n"
+                     "Playback controls remain available below.",
+                bg="#000000", fg="#d5cde8", justify="center",
+                font=("Helvetica Neue", 17, "normal"),
+            ).place(relx=0.5, rely=0.5, anchor="center")
         self.video_host.update_idletasks()
 
         bottom = tk.Frame(parent, bg=SURFACE, padx=15, pady=8)

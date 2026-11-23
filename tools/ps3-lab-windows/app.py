@@ -23,6 +23,9 @@ import urllib.request
 from ps3lab.jellyfin import JellyfinClient, JellyfinError
 from ps3lab.model import Profile, ps3_memory_budget, simulate_scenario
 from ps3lab.proxy import LocalProxy, StreamController
+from ps3lab.player import (build_mpv_args, ipc_command, new_ipc_path,
+                           validated_seek, validated_volume)
+from ps3lab.theater import TheaterUI
 
 MAX_EVENTS = 6000
 REF = "mghazalyh/JellyFin-PS3 v3.6.5-surf.1"
@@ -55,6 +58,10 @@ class Ps3Lab:
         self.session = None
         self.proxy = None
         self.player = None
+        self.ipc_path = None
+        self.position_ticks = 0
+        self.is_paused = False
+        self.last_player_poll = 0.0
         self.probe_stop = threading.Event()
         self.profile = Profile.from_switches(False, False)
         self.controller = StreamController(self.emit)
@@ -70,29 +77,10 @@ class Ps3Lab:
         self.emit("lab_started", {"ps3_reference": "v3.6.5-surf.1"})
 
     def _layout(self):
-        frame = ttk.Frame(self.root, padding=12)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Jellyfin PS3 Lab", font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(frame, wraplength=970, text=(
-            "Windows PS3 client identity, MPEG-TS analyzer, CPU/RSX/Cell timing model, "
-            "2.4 GHz 802.11b simulation and optional RPCS3 launcher. "
-            "Physical hardware emulation requires separately running RPCS3."
-        )).pack(anchor="w", pady=(2, 9))
-        tabs = ttk.Notebook(frame)
-        tabs.pack(fill="both", expand=True)
-        connect, play, limits, evidence, rpcs3 = (ttk.Frame(tabs, padding=12) for _ in range(5))
-        for tab, label in (
-            (connect, "Jellyfin PS3 sign-in"), (play, "Playback / TS"),
-            (limits, "PS3 slowness controls"), (evidence, "Evidence"),
-            (rpcs3, "RPCS3")
-        ):
-            tabs.add(tab, text=label)
-        self._connect_tab(connect)
-        self._play_tab(play)
-        self._limits_tab(limits)
-        self._evidence_tab(evidence)
-        self._rpc_tab(rpcs3)
-        ttk.Label(frame, textvariable=self.status, relief="sunken").pack(fill="x", pady=(8, 0))
+        # The real media library and embedded player are now the primary UI.
+        # Keep the existing PS3 resource, evidence and RPCS3 panels behind
+        # the diagnostics view, rather than presenting five debug-first tabs.
+        self.ui = TheaterUI(self, self.root)
 
     def _connect_tab(self, tab):
         form = ttk.Frame(tab)
@@ -236,22 +224,16 @@ class Ps3Lab:
         return "login", details
 
     def load_channels(self):
-        if self.client:
-            self.worker(lambda: ("items", self.client.channels()))
-        else:
-            self.status.set("Sign in first")
+        self.ui.navigate("live")
 
     def load_library(self):
-        if self.client:
-            self.worker(lambda: ("items", self.client.media_items(175)))
-        else:
-            self.status.set("Sign in first")
+        self.ui.navigate("home")
 
     def selected(self):
-        chosen = self.tree.selection()
-        if not chosen or not self.client:
-            raise JellyfinError("Sign in and select a Live TV channel or movie")
-        return self.items[int(chosen[0])]
+        item = self.ui.selected_item
+        if not item or not self.client:
+            raise JellyfinError("Sign in and select a movie, episode or channel")
+        return item
 
     def begin(self, probe):
         try:
@@ -259,6 +241,8 @@ class Ps3Lab:
         except JellyfinError as ex:
             messagebox.showwarning("PS3 Lab", str(ex))
             return
+        if not probe:
+            self.ui.show_player(item)
         self.worker(self.prepare, item, probe, self.hd.get(), self.surround.get())
 
     def prepare(self, item, probe, hd, surround):
@@ -275,6 +259,9 @@ class Ps3Lab:
         self.proxy.start()
         self.running = True
         self.last_progress_at = 0
+        self.last_player_poll = 0
+        self.position_ticks = 0
+        self.is_paused = False
         self.emit("stream_opened", {"live": session.live, "hd": hd, "mode": self.profile.name})
         self.worker(self.send_playstate, session, "start")
         if probe:
@@ -286,16 +273,44 @@ class Ps3Lab:
             self.status.set("No mpv.exe found. Use Probe or install portable mpv.")
             self.stop()
             return
-        args = [mpv, "--no-config", "--hwdec=no", "--cache=yes",
-                "--cache-secs=1", "--force-window=yes", "--keep-open=no",
-                "--title=Jellyfin PS3 Lab", self.proxy.url]
+        try:
+            self.ipc_path = new_ipc_path()
+            window_handle = int(self.ui.video_host.winfo_id())
+            args = build_mpv_args(mpv, self.proxy.url, window_handle, self.ipc_path)
+        except (ValueError, RuntimeError, tk.TclError) as ex:
+            self.emit("mpv_embed_error", {"type": type(ex).__name__})
+            self.status.set("Unable to initialize embedded video")
+            self.stop()
+            return
         try:
             self.player = subprocess.Popen(args, cwd=str(Path(mpv).parent),
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.status.set("Playing PS3-like MPEG-TS through loopback")
+            self.status.set("Playing Jellyfin media in embedded mpv with PS3 stream negotiation")
         except OSError as ex:
             self.emit("mpv_start_error", {"type": type(ex).__name__})
             self.stop()
+
+    def player_command(self, action, value=None):
+        """Issue real media playback commands via private mpv IPC."""
+        if not self.player or self.player.poll() is not None or not self.ipc_path:
+            self.status.set("No active player")
+            return
+        commands = {
+            "pause": ["cycle", "pause"],
+            "back": ["seek", -10, "relative"],
+            "forward": ["seek", 30, "relative"],
+        }
+        if action == "volume":
+            parts = ["set_property", "volume", validated_volume(value)]
+        elif action == "seek":
+            parts = ["seek", validated_seek(value), "relative"]
+        else:
+            parts = commands.get(action)
+        if parts is None:
+            self.status.set("Unknown player command")
+            return
+        pipe = self.ipc_path
+        self.worker(lambda: ("mpv_command", (action, ipc_command(pipe, parts))))
 
     @staticmethod
     def find_mpv():
@@ -322,7 +337,8 @@ class Ps3Lab:
 
     def send_playstate(self, session, action):
         try:
-            self.client.playstate(session, action)
+            self.client.playstate(session, action, pos_ticks=self.position_ticks,
+                                  paused=self.is_paused)
             return "playstate", action
         except Exception as ex:
             return "playstate_error", type(ex).__name__
@@ -332,6 +348,8 @@ class Ps3Lab:
         self.session = None
         self.running = False
         self.probe_stop.set()
+        self.ipc_path = None
+        self.is_paused = False
         if self.player:
             try:
                 self.player.terminate()
@@ -398,6 +416,10 @@ class Ps3Lab:
                     kind, value = self.bus.get_nowait()
                 except queue.Empty:
                     break
+                if kind == "artwork":
+                    generation, idx, bytes_data = value
+                    self.ui.set_artwork(generation, idx, bytes_data)
+                    continue
                 if kind == "event":
                     self._render_event(value)
                     if value["event"] == "sample":
@@ -418,14 +440,13 @@ class Ps3Lab:
                         self.device_display.set(
                             "Logged in as PS3. Diagnostic device id: " + result["device_id"])
                         self.status.set("Connected and authenticated")
-                        self.load_channels()
+                        self.ui.navigate("home")
+                    elif key == "browse":
+                        generation, payload = result
+                        self.ui.show_items(generation, payload)
                     elif key == "items":
-                        self.items = [x for x in result if x.get("Id")]
-                        self.tree.delete(*self.tree.get_children())
-                        for i, obj in enumerate(self.items):
-                            self.tree.insert("", "end", iid=str(i), values=(
-                                obj.get("Type", ""), obj.get("Name", ""), obj.get("Id", "")))
-                        self.status.set(f"{len(self.items)} items loaded")
+                        self.ui.show_items(self.ui.generation, {
+                            "Items": result, "TotalRecordCount": len(result)})
                     elif key == "prepared":
                         session, probe, hd = result
                         self.begin_stream(session, probe, hd)
@@ -435,6 +456,17 @@ class Ps3Lab:
                     elif key in ("probe_complete", "probe_error"):
                         self.status.set(str(key))
                         self.stop()
+                    elif key == "mpv_command":
+                        action, _response = result
+                        if action == "pause":
+                            self.is_paused = not self.is_paused
+                            self.ui.pause_text.set("Resume" if self.is_paused else "Pause")
+                        self.emit("mpv_control", {"action": action})
+                    elif key == "mpv_time":
+                        try:
+                            self.position_ticks = max(0, int(float(result or 0) * 10000000))
+                        except (ValueError, TypeError, OverflowError):
+                            pass
                     elif key == "playstate_error":
                         self.emit("playstate_error", {"type": result})
                     elif key == "playstate":
@@ -444,6 +476,11 @@ class Ps3Lab:
                 self.stop()
             if self.running and self.session and self.client:
                 now = time.monotonic()
+                if self.player and self.ipc_path and now - self.last_player_poll > 3:
+                    self.last_player_poll = now
+                    pipe = self.ipc_path
+                    self.worker(lambda: ("mpv_time", ipc_command(
+                        pipe, ["get_property", "time-pos"]).get("data", 0)))
                 if now - self.last_progress_at > 10:
                     self.last_progress_at = now
                     self.worker(self.send_playstate, self.session, "progress")
@@ -519,13 +556,17 @@ class Ps3Lab:
     def close(self):
         try:
             self.stop()
+            self.ui.close()
         finally:
             self.root.destroy()
 
 
 def main():
     root = tk.Tk()
-    Ps3Lab(root)
+    lab = Ps3Lab(root)
+    if "--smoke-test" in sys.argv:
+        # Used only by GitHub-hosted Windows CI to validate the full GUI.
+        root.after(450, lab.close)
     root.mainloop()
 
 

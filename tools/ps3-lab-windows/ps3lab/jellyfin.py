@@ -212,6 +212,105 @@ class JellyfinClient:
         result = self.request(f"Users/{urllib.parse.quote(self.user_id)}/Items?{q}")
         return result.get("Items", []) if isinstance(result, dict) else []
 
+    def browse(self, category="home", start=0, limit=48,
+               search="", parent_id="") -> dict:
+        """Page through real Jellyfin library items, with no synthetic media.
+
+        Series expansion uses the SeriesId filter so episodes from a complete
+        series can be selected and streamed using normal PlaybackInfo.
+        """
+        if not self.user_id:
+            raise JellyfinError("not authenticated")
+        categories = {
+            "home": "Movie,Episode",
+            "movies": "Movie",
+            "shows": "Series",
+            "episodes": "Episode",
+            "resume": "Movie,Episode",
+        }
+        if category not in categories and category != "live":
+            raise JellyfinError("unsupported library category")
+        start = max(0, int(start))
+        limit = max(1, min(100, int(limit)))
+        search = str(search or "").strip()[:120]
+        if category == "live":
+            params = {
+                "UserId": self.user_id, "StartIndex": start,
+                "Limit": limit, "EnableImages": "true",
+                "EnableUserData": "true",
+            }
+            if search:
+                params["SearchTerm"] = search
+            data = self.request("LiveTv/Channels?" + urllib.parse.urlencode(params))
+        else:
+            params = {
+                "StartIndex": start, "Limit": limit,
+                "Recursive": "true", "IncludeItemTypes": categories[category],
+                "Fields": "Overview,PrimaryImageAspectRatio,DateCreated,MediaSources",
+                "EnableImageTypes": "Primary,Backdrop,Thumb",
+                "EnableUserData": "true",
+            }
+            if category == "home":
+                params.update({"SortBy": "DateCreated", "SortOrder": "Descending"})
+            else:
+                params.update({"SortBy": "SortName", "SortOrder": "Ascending"})
+            if search:
+                params["SearchTerm"] = search
+            if parent_id:
+                # The SeriesId filter is stable for episodes even when the
+                # actual parent is a season rather than the series itself.
+                params["SeriesId"] = parent_id
+                params["IncludeItemTypes"] = "Episode"
+            prefix = ("Users/" + urllib.parse.quote(self.user_id, safe="") +
+                      ("/Items/Resume" if category == "resume" else "/Items"))
+            if category == "resume":
+                params.pop("SortBy", None)
+                params.pop("SortOrder", None)
+                params.pop("Recursive", None)
+                params.pop("IncludeItemTypes", None)
+            data = self.request(prefix + "?" + urllib.parse.urlencode(params))
+        if not isinstance(data, dict):
+            raise JellyfinError("Jellyfin returned an invalid item page")
+        items = data.get("Items")
+        if not isinstance(items, list):
+            raise JellyfinError("Jellyfin item list missing")
+        return {
+            "Items": [item for item in items if isinstance(item, dict)],
+            "TotalRecordCount": data.get("TotalRecordCount", len(items)),
+            "StartIndex": start,
+        }
+
+    def image_bytes(self, item: dict) -> bytes:
+        """Retrieve a bounded poster through authenticated headers.
+
+        Tokens are never put in image URLs, UI logs, the mpv subprocess, or
+        the JSONL diagnostic stream. Art is decoded on the Tk main thread.
+        """
+        if not self.user_id or not isinstance(item, dict):
+            return b""
+        item_id = item.get("PrimaryImageItemId") or item.get("Id")
+        if not isinstance(item_id, str) or not item_id:
+            return b""
+        tags = item.get("ImageTags") or {}
+        if not isinstance(tags, dict):
+            tags = {}
+        if not (tags.get("Primary") or item.get("PrimaryImageItemId") or
+                item.get("SeriesPrimaryImageTag")):
+            return b""
+        path = "Items/" + urllib.parse.quote(item_id, safe="") + (
+            "/Images/Primary?maxWidth=300&quality=78")
+        req = urllib.request.Request(
+            self.base_url + "/" + path, headers=self.headers(), method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as reply:
+                content_type = reply.headers.get("Content-Type", "").lower()
+                if not content_type.startswith("image/"):
+                    return b""
+                data = reply.read(4 * 1024 * 1024 + 1)
+                return data if len(data) <= 4 * 1024 * 1024 else b""
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+            return b""
+
     def playback_info(self, item_id: str, hd=False, surround=False,
                       source_id="", live=False) -> dict:
         if not self.user_id:

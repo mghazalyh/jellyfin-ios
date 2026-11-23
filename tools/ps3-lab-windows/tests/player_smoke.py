@@ -76,6 +76,11 @@ def main():
     loghandle = open(logfile.name, "wb")
     try:
         args = build_mpv_args(str(mpv), proxy.url, int(host.winfo_id()), pipe)
+        if sys.platform == "darwin":
+            # The macOS process cannot embed its Cocoa window in Tk. Headless
+            # testing verifies actual H.264 decode and IPC on a CI runner.
+            args.insert(-1, "--vo=null")
+            args.insert(-1, "--ao=null")
         args.insert(1, "--log-file=" + logfile.name)
         proc = subprocess.Popen(args, cwd=str(mpv.parent),
                                 stdout=subprocess.DEVNULL, stderr=loghandle)

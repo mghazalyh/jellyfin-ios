@@ -28,6 +28,50 @@ class Ps3ForkParityTests(unittest.TestCase):
         self.assertTrue(client.device_id.startswith("ps3-lab-"))
         self.assertNotEqual(client.device_id, "ps3")
 
+    def test_actual_http_request_identifies_itself_as_ps3(self):
+        """Verify wire-visible identity, not merely string-builder output."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+        seen = {}
+
+        class FakeJellyfin(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["method"] = self.command
+                seen["path"] = self.path
+                seen["auth"] = self.headers.get("Authorization", "")
+                seen["user_agent"] = self.headers.get("User-Agent", "")
+                response = b'{"Version":"10.11.10","ServerName":"Fixture"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *_args):
+                pass
+
+        fixture = ThreadingHTTPServer(("127.0.0.1", 0), FakeJellyfin)
+        thread = Thread(target=fixture.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = JellyfinClient(
+                f"http://127.0.0.1:{fixture.server_port}",
+                device_id="ps3-lab-fixture-device"
+            )
+            info = client.request("/System/Info/Public")
+            self.assertEqual(info["ServerName"], "Fixture")
+            self.assertEqual(seen["method"], "GET")
+            self.assertEqual(seen["path"], "/System/Info/Public")
+            self.assertIn('Client="PS3"', seen["auth"])
+            self.assertIn('Device="PS3"', seen["auth"])
+            self.assertIn('DeviceId="ps3-lab-fixture-device"', seen["auth"])
+            self.assertIn('Version="0.1"', seen["auth"])
+            self.assertEqual(seen["user_agent"], "JellyfinPS3/0.1")
+        finally:
+            fixture.shutdown()
+            fixture.server_close()
+            thread.join(timeout=2)
+
     def test_profile_exact_default_720p_stereo_behavior(self):
         profile = ps3_device_profile()
         self.assertEqual(profile["Name"], "PS3")

@@ -42,5 +42,6 @@ describe('NativeShellWebView', () => {
 		const injected = UNSAFE_getByType('RNCWebView').props.injectedJavaScriptBeforeContentLoaded;
 		expect(injected).toContain('window.ExpoVideoProfile');
 		expect(injected).toContain('window.ExpoAppInfo');
+		expect(injected).toContain('window.ExpoAppSettings');
 	});
 });

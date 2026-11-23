@@ -30,3 +30,9 @@ The iPad uses its configured Jellyfin server URL. Localhost `127.0.0.1:8103` in 
 ## Release and regression
 
 GitHub-hosted CI runs the repository's lint, TypeScript, Metro export, Jest and the existing unsigned TrollStore IPA workflow. No user Mac, PC, PS3 or iPad is used to compile this release. The regular release workflow publishes an unsigned IPA when this change reaches `master`.
+
+## Verified PS3 request identity
+
+When the diagnostic switch is on, the iOS SDK uses Client=PS3, Device=PS3 and Version=0.1 with its existing unique iPad DeviceId. The WebView app info uses those values, its fetch and XMLHttpRequest hooks rewrite MediaBrowser Authorization identity without altering Token or DeviceId, and the WebView appends JellyfinPS3/0.1 to its User-Agent. The iPad's User-Agent therefore retains WebKit compatibility information and is not byte-for-byte the console's raw HTTP User-Agent. Normal mode is unchanged. The Windows PS3 Lab does use the exact standalone JellyfinPS3/0.1 User-Agent.
+
+Over-the-wire Windows identity is asserted against a local fixture on GitHub-hosted runners. This proves what the test server receives; it does not establish successful negotiation with the private production server.

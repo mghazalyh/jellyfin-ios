@@ -43,10 +43,10 @@ const NativeShellWebView: ForwardRefRenderFunction<WebView, NativeShellWebViewPr
 
 	const injectedJavaScript = `
 window.ExpoAppInfo = {
-	appName: '${getAppName()}',
-	appVersion: '${nativeApplicationVersion}',
-	deviceId: '${rootStore.deviceId}',
-	deviceName: '${getSafeDeviceName().replace(/'/g, '\\\'')}'
+	appName: ${JSON.stringify(settingStore.isPs3DiagnosticEnabled ? 'PS3' : getAppName())},
+	appVersion: ${JSON.stringify(settingStore.isPs3DiagnosticEnabled ? '0.1' : nativeApplicationVersion)},
+	deviceId: ${JSON.stringify(rootStore.deviceId)},
+	deviceName: ${JSON.stringify(settingStore.isPs3DiagnosticEnabled ? 'PS3' : getSafeDeviceName())}
 };
 
 window.ExpoAppSettings = {
@@ -228,6 +228,7 @@ true;
 			{...props}
 			// Allow any origin blocking can break various things like book playback
 			originWhitelist={[ '*' ]}
+			applicationNameForUserAgent={settingStore.isPs3DiagnosticEnabled ? 'JellyfinPS3/0.1' : undefined}
 			source={{ uri: server.urlString }}
 			// Inject javascript for NativeShell
 			// This method is preferred, but only supported on iOS currently

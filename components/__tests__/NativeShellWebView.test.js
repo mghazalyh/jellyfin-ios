@@ -35,12 +35,12 @@ getSafeDeviceName.mockImplementation(() => 'Test Device');
 
 describe('NativeShellWebView', () => {
 	it('should render correctly', () => {
-		const { toJSON } = render(
+		const { UNSAFE_getByType } = render(
 			<NativeShellWebView />
 		);
 
-		const rendered = JSON.stringify(toJSON());
-		expect(rendered).toContain('window.ExpoVideoProfile');
-		expect(rendered).toContain('window.ExpoAppInfo');
+		const injected = UNSAFE_getByType('RNCWebView').props.injectedJavaScriptBeforeContentLoaded;
+		expect(injected).toContain('window.ExpoVideoProfile');
+		expect(injected).toContain('window.ExpoAppInfo');
 	});
 });

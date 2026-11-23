@@ -130,7 +130,9 @@ export function observePs3Source(sourceId, bootId, previous) {
 	return current;
 }
 
-export function getPs3Generation() { return generation; }
+export function getPs3Generation() {
+	return generation;
+}
 
 export async function loadPs3Diagnostics() {
 	if (ready) return;

@@ -1,71 +1,122 @@
-/**
- * Injected only when PS3 diagnostics are enabled. Records HTTP response
- * metadata for media and Surf routes; never forwards URLs, headers or bodies.
- * Original fetch/XHR behavior is preserved, including rejected promises.
- */
-const ps3WebHook = `
+/** Opt-in PS3 server identity and redacted transport tracing for WebView. */
+const ps3WebHook = String.raw`
 (function () {
   if (window.__jfiPs3TraceInstalled) return;
   window.__jfiPs3TraceInstalled = true;
-  var emitted = 0;
+  var total = 0;
+  var originalFetch = window.fetch;
   function route(url) {
-    var s = String(url || '').split('?')[0].toLowerCase();
-    if (/\\/api\\/surf\\//.test(s)) return 'surf-control';
-    if (/\\/live\\/(all|sports|movies-series)\\.ts/.test(s)) return 'ps3-continuous-ts';
-    if (/\\/hls\\//.test(s) || /\\.m3u8$/.test(s)) return 'hls';
-    if (/\\/livetv\\//.test(s)) return 'livetv';
-    if (/\\/playbackinfo/.test(s)) return 'playback-info';
-    if (/\\/videos\\//.test(s)) return 'jellyfin-media';
+    var name = String(url || '').split('?')[0].toLowerCase();
+    if (name.indexOf('/api/surf/') >= 0) return 'surf-control';
+    if (name.indexOf('/live/') >= 0 && name.indexOf('.ts') >= 0) return 'ps3-continuous-ts';
+    if (name.indexOf('/hls/') >= 0 || name.indexOf('.m3u8') >= 0) return 'hls';
+    if (name.indexOf('/livetv/') >= 0) return 'livetv';
+    if (name.indexOf('/playbackinfo') >= 0) return 'playback-info';
+    if (name.indexOf('/videos/') >= 0) return 'jellyfin-media';
     return null;
   }
-  function send(type, data) {
-    try {
-      if (++emitted > 250 || !window.ReactNativeWebView) return;
-      window.ReactNativeWebView.postMessage(JSON.stringify({
-        event: 'PS3Diagnostic.network', data: Object.assign({ status: type }, data)
-      }));
-    } catch (_) {}
+  function spoofIdentity(value) {
+    var input = String(value || '');
+    if (!/^MediaBrowser(\s|$)/i.test(input)) return input;
+    var result = input;
+    [['Client', 'PS3'], ['Device', 'PS3'], ['Version', '0.1']].forEach(function (field) {
+      var name = field[0], val = field[1];
+      var pattern = new RegExp('(^|[ ,])' + name + '=(?:"[^"]*"|[^, ]+)', 'i');
+      if (pattern.test(result)) result = result.replace(pattern, '$1' + name + '="' + val + '"');
+      else result += ', ' + name + '="' + val + '"';
+    });
+    // DeviceId and Token are deliberately preserved from the iPad login.
+    return result;
   }
-  if (typeof window.fetch === 'function') {
-    var originalFetch = window.fetch;
-    window.fetch = function () {
-      var arg = arguments[0];
-      var url = typeof arg === 'string' ? arg : (arg && arg.url);
-      var selected = route(url);
-      if (!selected) return originalFetch.apply(this, arguments);
-      var start = Date.now();
-      return originalFetch.apply(this, arguments).then(function (response) {
-        send('complete', { route: selected, httpStatus: response.status,
-          elapsedMs: Date.now() - start, contentType: String(response.headers.get('content-type') || '').split(';')[0] });
+  function patchHeaders(original) {
+    if (typeof Headers !== 'function') return original;
+    var result = new Headers(original || {});
+    ['Authorization', 'X-Emby-Authorization'].forEach(function (name) {
+      if (result.has(name)) result.set(name, spoofIdentity(result.get(name)));
+    });
+    return result;
+  }
+  function trace(state, data) {
+    try {
+      if (++total > 250 || !window.ReactNativeWebView) return;
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        event: 'PS3Diagnostic.network',
+        data: Object.assign({ status: state }, data)
+      }));
+    } catch (error) {}
+  }
+  if (typeof originalFetch === 'function') {
+    window.fetch = function (input, init) {
+      var req = input, opts = init || {};
+      var methodHeaders = opts.headers;
+      var isRequest = typeof Request === 'function' && input instanceof Request;
+      var url = typeof input === 'string' ? input : (input && input.url);
+      var match = route(url);
+      try {
+        if (isRequest) {
+          var cloned = new Headers(input.headers);
+          if (methodHeaders) new Headers(methodHeaders).forEach(function (val, key) {
+            cloned.set(key, val);
+          });
+          req = new Request(input, Object.assign({}, opts, { headers: patchHeaders(cloned) }));
+          opts = undefined;
+        } else if (methodHeaders) {
+          opts = Object.assign({}, opts, { headers: patchHeaders(methodHeaders) });
+        }
+      } catch (error) {
+        req = input;
+        opts = init;
+      }
+      var started = Date.now();
+      return originalFetch.call(this, req, opts).then(function (response) {
+        if (match) trace('complete', {
+          route: match,
+          httpStatus: response.status,
+          elapsedMs: Date.now() - started,
+          contentType: String(response.headers.get('content-type') || '').split(';')[0]
+        });
         return response;
       }, function (error) {
-        send('failure', { route: selected, elapsedMs: Date.now() - start });
+        if (match) trace('failure', { route: match, elapsedMs: Date.now() - started });
         throw error;
       });
     };
   }
   if (window.XMLHttpRequest && window.XMLHttpRequest.prototype) {
-    var originalOpen = window.XMLHttpRequest.prototype.open;
-    var originalSend = window.XMLHttpRequest.prototype.send;
-    window.XMLHttpRequest.prototype.open = function (method, url) {
-      this.__jfiPs3Route = route(url);
-      this.__jfiPs3Start = 0;
-      return originalOpen.apply(this, arguments);
+    var proto = window.XMLHttpRequest.prototype;
+    var nativeOpen = proto.open;
+    var nativeSetHeader = proto.setRequestHeader;
+    var nativeSend = proto.send;
+    proto.open = function (method, url) {
+      this.__jfiRoute = route(url);
+      return nativeOpen.apply(this, arguments);
     };
-    window.XMLHttpRequest.prototype.send = function () {
-      if (this.__jfiPs3Route) {
+    proto.setRequestHeader = function (name, value) {
+      var header = String(name).toLowerCase();
+      if (header === 'authorization' || header === 'x-emby-authorization') {
+        return nativeSetHeader.call(this, name, spoofIdentity(value));
+      }
+      return nativeSetHeader.apply(this, arguments);
+    };
+    proto.send = function () {
+      if (this.__jfiRoute) {
         var xhr = this;
-        xhr.__jfiPs3Start = Date.now();
+        var begin = Date.now();
         xhr.addEventListener('loadend', function () {
           var mime = '';
-          try { mime = String(xhr.getResponseHeader('content-type') || '').split(';')[0]; } catch (_) {}
-          send('complete', { route: xhr.__jfiPs3Route, httpStatus: xhr.status,
-            elapsedMs: Date.now() - xhr.__jfiPs3Start, contentType: mime });
+          try { mime = String(xhr.getResponseHeader('content-type') || '').split(';')[0]; }
+          catch (error) {}
+          trace('complete', {
+            route: xhr.__jfiRoute,
+            httpStatus: xhr.status,
+            elapsedMs: Date.now() - begin, contentType: mime
+          });
         }, { once: true });
       }
-      return originalSend.apply(this, arguments);
+      return nativeSend.apply(this, arguments);
     };
   }
 })();
+
 `;
 export default ps3WebHook;

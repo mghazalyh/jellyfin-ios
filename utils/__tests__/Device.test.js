@@ -84,6 +84,8 @@ describe('Device', () => {
 			Platform.OS = 'ios';
 			Platform.Version = '17';
 			expect(getDeviceProfile({ enableFmp4: true, ps3Diagnostic: true })).toBe(Ps3SurfProfile);
+			expect(Ps3SurfProfile.DirectPlayProfiles).toEqual([]);
+			expect(Ps3SurfProfile.Name).toBe('PS3');
 			expect(Ps3SurfProfile.TranscodingProfiles.filter(x => x.Type === 'Video').every(x => x.Protocol === 'http')).toBe(true);
 		});
 

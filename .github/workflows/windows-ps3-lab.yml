@@ -3,6 +3,9 @@ name: Windows PS3 Lab parity and prerelease
 on:
   push:
     branches: [ feature/ps3-parity-diagnostics-20261124 ]
+    paths:
+      - 'tools/ps3-lab-windows/**'
+      - '.github/workflows/windows-ps3-lab.yml'
   pull_request:
     branches: [ master ]
     paths:

@@ -25,7 +25,7 @@ from ps3lab.model import Profile, ps3_memory_budget, simulate_scenario
 from ps3lab.proxy import LocalProxy, StreamController
 from ps3lab.player import (build_mpv_args, ipc_command, new_ipc_path,
                            validated_seek, validated_volume)
-from ps3lab.theater import TheaterUI
+from ps3lab.cinema import CinematicUI
 
 MAX_EVENTS = 6000
 REF = "mghazalyh/JellyFin-PS3 v3.6.5-surf.1"
@@ -80,7 +80,7 @@ class Ps3Lab:
         # The real media library and embedded player are now the primary UI.
         # Keep the existing PS3 resource, evidence and RPCS3 panels behind
         # the diagnostics view, rather than presenting five debug-first tabs.
-        self.ui = TheaterUI(self, self.root)
+        self.ui = CinematicUI(self, self.root)
 
     def _connect_tab(self, tab):
         form = ttk.Frame(tab)
@@ -416,6 +416,10 @@ class Ps3Lab:
                     kind, value = self.bus.get_nowait()
                 except queue.Empty:
                     break
+                if kind == "cinema_backdrop":
+                    generation, key, item_id, bytes_data = value
+                    self.ui.set_backdrop(generation, key, item_id, bytes_data)
+                    continue
                 if kind == "artwork":
                     generation, idx, bytes_data = value
                     self.ui.set_artwork(generation, idx, bytes_data)
@@ -441,6 +445,12 @@ class Ps3Lab:
                             "Logged in as PS3. Diagnostic device id: " + result["device_id"])
                         self.status.set("Connected and authenticated")
                         self.ui.navigate("home")
+                    elif key == "home_result":
+                        generation, category, data, error = result
+                        self.ui.home_result(generation, category, data, error)
+                    elif key == "cinema_episodes":
+                        generation, series_id, data, error = result
+                        self.ui.show_episodes(generation, series_id, data, error)
                     elif key == "browse":
                         generation, payload = result
                         self.ui.show_items(generation, payload)

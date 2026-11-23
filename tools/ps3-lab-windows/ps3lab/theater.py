@@ -142,6 +142,7 @@ class TheaterUI:
         search = tk.Entry(toolbar, textvariable=self.search_text, bg=SURFACE,
                           insertbackground=WHITE, fg=WHITE, relief="flat",
                           font=("Segoe UI", 12), width=31)
+        self.search_entry = search
         search.pack(side="right", ipady=9, padx=(9, 0))
         search.bind("<Return>", lambda _event: self.search())
         self._btn(toolbar, "Search", self.search).pack(side="right")

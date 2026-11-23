@@ -223,6 +223,8 @@ class JellyfinClient:
             raise JellyfinError("not authenticated")
         categories = {
             "home": "Movie,Episode",
+            "recent": "Movie,Episode",
+            "search": "Movie,Series,Episode",
             "movies": "Movie",
             "shows": "Series",
             "episodes": "Episode",
@@ -250,7 +252,7 @@ class JellyfinClient:
                 "EnableImageTypes": "Primary,Backdrop,Thumb",
                 "EnableUserData": "true",
             }
-            if category == "home":
+            if category in ("home", "recent"):
                 params.update({"SortBy": "DateCreated", "SortOrder": "Descending"})
             else:
                 params.update({"SortBy": "SortName", "SortOrder": "Ascending"})
@@ -280,34 +282,60 @@ class JellyfinClient:
             "StartIndex": start,
         }
 
-    def image_bytes(self, item: dict) -> bytes:
-        """Retrieve a bounded poster through authenticated headers.
+    def series_episodes(self, series_id: str) -> dict:
+        """List real seasons/episodes using Jellyfin's dedicated Shows endpoint."""
+        if not self.user_id or not series_id:
+            raise JellyfinError("authentication and series id are required")
+        series = urllib.parse.quote(str(series_id), safe="")
+        params = urllib.parse.urlencode({
+            "UserId": self.user_id,
+            "Fields": "Overview,PrimaryImageAspectRatio",
+            "EnableUserData": "true",
+            "Limit": 250,
+        })
+        payload = self.request(f"Shows/{series}/Episodes?{params}", timeout=45)
+        if not isinstance(payload, dict) or not isinstance(payload.get("Items"), list):
+            raise JellyfinError("Jellyfin returned an invalid episode list")
+        return payload
 
-        Tokens are never put in image URLs, UI logs, the mpv subprocess, or
-        the JSONL diagnostic stream. Art is decoded on the Tk main thread.
-        """
+    def image_bytes(self, item: dict, image_type="Primary") -> bytes:
+        """Authenticated, size-bounded poster/backdrop fetch without URL tokens."""
         if not self.user_id or not isinstance(item, dict):
             return b""
-        item_id = item.get("PrimaryImageItemId") or item.get("Id")
-        if not isinstance(item_id, str) or not item_id:
-            return b""
+        if image_type not in ("Primary", "Backdrop", "Thumb"):
+            raise JellyfinError("unsupported image kind")
         tags = item.get("ImageTags") or {}
         if not isinstance(tags, dict):
             tags = {}
-        if not (tags.get("Primary") or item.get("PrimaryImageItemId") or
-                item.get("SeriesPrimaryImageTag")):
+        image_id = item.get("PrimaryImageItemId") if image_type == "Primary" else None
+        if not image_id:
+            image_id = item.get("Id")
+        if not isinstance(image_id, str) or not image_id:
             return b""
-        path = "Items/" + urllib.parse.quote(item_id, safe="") + (
-            "/Images/Primary?maxWidth=300&quality=78")
-        req = urllib.request.Request(
-            self.base_url + "/" + path, headers=self.headers(), method="GET")
+        # Some Jellyfin libraries have series artwork only; fall back through
+        # server-provided image IDs rather than constructing untrusted URLs.
+        if image_type == "Backdrop":
+            has_art = (tags.get("Backdrop") or
+                       item.get("BackdropImageTags") or
+                       item.get("ParentBackdropImageTags"))
+        else:
+            has_art = tags.get(image_type) or image_id != item.get("Id") or (
+                image_type == "Primary" and item.get("SeriesPrimaryImageTag"))
+        if not has_art:
+            return b""
+        max_width = 1250 if image_type == "Backdrop" else 300
+        route = ("Items/" + urllib.parse.quote(image_id, safe="") +
+                 "/Images/" + image_type + "?maxWidth=" + str(max_width) +
+                 "&quality=78")
+        req = urllib.request.Request(self.base_url + "/" + route,
+                                     headers=self.headers(), method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=15) as reply:
-                content_type = reply.headers.get("Content-Type", "").lower()
-                if not content_type.startswith("image/"):
+            with urllib.request.urlopen(req, timeout=15) as response:
+                mime = response.headers.get("Content-Type", "").lower()
+                if not mime.startswith("image/"):
                     return b""
-                data = reply.read(4 * 1024 * 1024 + 1)
-                return data if len(data) <= 4 * 1024 * 1024 else b""
+                body = response.read(4 * 1024 * 1024 + 1)
+                return body if len(body) <= 4 * 1024 * 1024 else b""
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
             return b""
 

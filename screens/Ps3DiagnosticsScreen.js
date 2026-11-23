@@ -50,7 +50,7 @@ const Ps3DiagnosticsScreen = () => {
 				text: 'Clear',
 				style: 'destructive',
 				onPress: async () => {
-				try {
+					try {
 						await clearPs3Diagnostics();
 						refresh();
 					} catch (error) {

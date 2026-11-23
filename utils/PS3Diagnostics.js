@@ -40,14 +40,15 @@ function hash(value) {
 export function classifyPlaybackRoute(url) {
 	try {
 		const pathname = new URL(String(url || ''), 'https://invalid.local').pathname.toLowerCase();
-		if (//api/surf/(all|sports|movies-series)/.test(pathname)) return 'surf-control';
-		if (//live/(all|sports|movies-series)\.ts/.test(pathname)) return 'ps3-continuous-ts';
-		if (//hls//.test(pathname) || /\.m3u8$/.test(pathname)) return 'hls';
-		if (//(playlist\.ts\.m3u|livetv/livestreamfiles)/.test(pathname)) return 'livetv';
-		if (//(videos|audio)//.test(pathname) && /\.(ts|mpegts)$/.test(pathname)) return 'http-ts';
-		if (//(videos|audio)//.test(pathname) && /\.(mp4|m4v)$/.test(pathname)) return 'http-mp4';
-		if (//(videos|audio)//.test(pathname)) return 'jellyfin-media';
-		if (//playbackinfo/.test(pathname)) return 'playback-info';
+		const match = (expression) => new RegExp(expression).test(pathname);
+		if (match('/api/surf/(all|sports|movies-series)')) return 'surf-control';
+		if (match('/live/(all|sports|movies-series)[.]ts')) return 'ps3-continuous-ts';
+		if (pathname.includes('/hls/') || pathname.endsWith('.m3u8')) return 'hls';
+		if (match('/(playlist[.]ts[.]m3u|livetv/livestreamfiles)')) return 'livetv';
+		if (match('/(videos|audio)/') && /[.](ts|mpegts)$/.test(pathname)) return 'http-ts';
+		if (match('/(videos|audio)/') && /[.](mp4|m4v)$/.test(pathname)) return 'http-mp4';
+		if (match('/(videos|audio)/')) return 'jellyfin-media';
+		if (pathname.includes('/playbackinfo')) return 'playback-info';
 		return 'other';
 	} catch (error) {
 		console.warn('[PS3 diagnostics] Unable to classify route', String(error));
@@ -71,7 +72,7 @@ function scrub(input) {
 	// All data fields are already semantic labels, but reject accidental URLs
 	// and credentials even if a future caller passes untrusted text.
 	if (/[:][/][/]|(?:token|password|authorization|apikey|api_key)[=:]/i.test(input)) return 'redacted';
-	return input.replace(/[^a-zA-Z0-9_/. -]/g, '').slice(0, 72);
+	return input.replace(/[^a-zA-Z0-9_. -]/g, '').slice(0, 72);
 }
 
 export function recordPs3Diagnostic(type, payload = {}) {

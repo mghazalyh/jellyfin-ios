@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from .parity import stream_query, video_mode
 
 PS3_USER_AGENT = "JellyfinPS3/0.1"
@@ -420,6 +420,37 @@ class JellyfinClient:
             live_stream_id=liveid, live=live, title=item.get("Name") or "Untitled",
             url=link, start_ticks=start_ticks,
             duration_ticks=max(0, int(item.get("RunTimeTicks") or 0)))
+
+    def seek_session(self, session: PlaybackSession, start_ticks: int,
+                     *, hd=False, surround=False, quality="auto",
+                     budget_audio=True, no_video_copy=False, hd_codec="",
+                     ac3_copy=False, reported_audio_bps=0, audio_index=-1,
+                     subtitle_index=-1, subtitle_on_console=False) -> PlaybackSession:
+        """Reopen VOD at a new offset using the SAME PS3 session and source.
+
+        The physical PS3 player_session.cpp rebuilds stream.ts on seek with
+        the existing PlaySessionId, source and media settings. Making another
+        PlaybackInfo call can mint a new session and disrupt server cleanup.
+        """
+        if session.live:
+            raise JellyfinError("Live TV cannot be seeked")
+        if start_ticks < 0:
+            raise ValueError("negative seek position")
+        ticks = int(start_ticks)
+        if session.duration_ticks:
+            ticks = min(ticks, max(0, session.duration_ticks - 10000000))
+        new_url = build_stream_url(
+            self.base_url, session.item_id, session.source_id,
+            self.device_id, play_session_id=session.play_session_id,
+            live_stream_id=session.live_stream_id, live=False,
+            hd=hd, surround=surround, start_ticks=ticks,
+            quality=quality, budget_audio=budget_audio,
+            no_video_copy=no_video_copy, hd_codec=hd_codec,
+            ac3_copy=ac3_copy, reported_audio_bps=reported_audio_bps,
+            audio_index=audio_index, subtitle_index=subtitle_index,
+            subtitle_on_console=subtitle_on_console,
+        )
+        return replace(session, url=new_url, start_ticks=ticks)
 
     def playstate(self, session: PlaybackSession, action: str,
                   pos_ticks=0, paused=False):

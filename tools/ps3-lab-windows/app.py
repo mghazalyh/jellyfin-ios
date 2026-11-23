@@ -58,6 +58,7 @@ class Ps3Lab:
         self.session = None
         self.current_item = None
         self.current_source_id = ""
+        self.stream_settings = {}
         self.prepare_generation = 0
         self.proxy = None
         self.player = None
@@ -265,6 +266,10 @@ class Ps3Lab:
             else "")
         if not probe:
             self.ui.show_player(item)
+        self.stream_settings = {
+            "hd": self.hd.get(), "surround": self.surround.get(),
+            "quality": "auto", "budget_audio": True,
+        }
         self.prepare_generation += 1
         request_id = self.prepare_generation
         hd, surround = self.hd.get(), self.surround.get()
@@ -286,21 +291,19 @@ class Ps3Lab:
             return
         try:
             requested = max(0, int(float(seconds) * 10000000))
-            if self.session.duration_ticks:
-                requested = min(requested, max(
-                    0, self.session.duration_ticks - 10000000))
-        except (ValueError, TypeError, OverflowError):
-            return
-        self.prepare_generation += 1
-        request_id = self.prepare_generation
-        item = self.current_item
-        self.status.set("Seeking through Jellyfin playback negotiation")
-        self.worker(self.prepare, item, False, self.hd.get(),
-                    self.surround.get(), requested, request_id,
-                    self.current_source_id)
+            selected = self.session
+            replay = self.client.seek_session(
+                selected, requested, **self.stream_settings)
+            self.prepare_generation += 1
+            self.begin_stream(replay, False, self.stream_settings.get("hd", False),
+                              seeking=True)
+            self.status.set("PS3 session preserved across server-side seek")
+        except (JellyfinError, ValueError, OSError) as exc:
+            self.status.set("Seek failed: " + type(exc).__name__)
+            self.emit("seek_error", {"kind": type(exc).__name__})
 
-    def begin_stream(self, session, probe, hd):
-        self.stop()
+    def begin_stream(self, session, probe, hd, seeking=False):
+        self._teardown(report_stop=not seeking)
         self.session = session
         self.probe_stop = threading.Event()
         self.controller.configure(session.url, self.client.headers(), self.profile, hd)
@@ -314,7 +317,8 @@ class Ps3Lab:
         self.ui.update_playback_position(self.position_ticks,
                                          session.duration_ticks)
         self.emit("stream_opened", {"live": session.live, "hd": hd, "mode": self.profile.name})
-        self.worker(self.send_playstate, session, "start")
+        self.worker(self.send_playstate, session,
+                    "progress" if seeking else "start", session.start_ticks, False)
         if probe:
             self.worker(self.probe, self.proxy.url, self.probe_stop)
             self.status.set("Probing live MPEG-TS transport for 20 seconds")
@@ -401,6 +405,9 @@ class Ps3Lab:
 
     def stop(self):
         self.prepare_generation += 1
+        self._teardown(report_stop=True)
+
+    def _teardown(self, report_stop=True):
         prior_position = self.position_ticks
         prior = self.session
         self.session = None
@@ -424,7 +431,7 @@ class Ps3Lab:
             except (OSError, RuntimeError) as ex:
                 self.emit("proxy_shutdown_error", {"type": type(ex).__name__})
             self.proxy = None
-        if prior and self.client:
+        if prior and report_stop and self.client:
             self.worker(self.send_playstate, prior, "stopped", prior_position, False)
         self.summary.set("No active stream")
 

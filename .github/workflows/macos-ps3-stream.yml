@@ -1,0 +1,135 @@
+name: macOS Apple Silicon Jellyfin PS3 Stream
+
+on:
+  push:
+    branches: [ feature/windows-jellyfin-theater-20261124 ]
+    paths:
+      - 'tools/ps3-lab-windows/**'
+      - '.github/workflows/macos-ps3-stream.yml'
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'tools/ps3-lab-windows/**'
+      - '.github/workflows/macos-ps3-stream.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ps3-stream-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    name: Native Apple Silicon macOS 15 app and PS3 decoder tests
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify Apple Silicon architecture and Tk availability
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(uname -m)" = "arm64"
+          sw_vers
+          python -c 'import platform, tkinter; print(platform.platform(), tkinter.TkVersion)'
+      - name: Install poster renderer and app freezer
+        shell: bash
+        run: python -m pip install --disable-pip-version-check Pillow==11.3.0 pyinstaller==6.16.0
+      - name: Compile and run all PS3 protocol and macOS player tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m compileall -q tools/ps3-lab-windows
+          cd tools/ps3-lab-windows
+          python -m unittest discover -s tests -v
+      - name: Cinematic GUI smoke test against fixture Jellyfin
+        shell: bash
+        run: python tools/ps3-lab-windows/tests/ui_smoke.py
+      - name: Download pinned first-party arm64 mpv.app
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          ARCHIVE="mpv-v0.42.0-dev-g35efcf53d-45211341722-macos-15-arm.zip"
+          mkdir -p "$RUNNER_TEMP/mpv-download" "$RUNNER_TEMP/mpv-expanded"
+          gh release download git-release --repo mpv-player/mpv \
+            --pattern "$ARCHIVE" --dir "$RUNNER_TEMP/mpv-download"
+          test -s "$RUNNER_TEMP/mpv-download/$ARCHIVE"
+          unzip -q "$RUNNER_TEMP/mpv-download/$ARCHIVE" -d "$RUNNER_TEMP/mpv-expanded"
+          TAR_FILE="$(find "$RUNNER_TEMP/mpv-expanded" -type f -name '*.tar.gz' -print -quit)"
+          test -n "$TAR_FILE"
+          tar -xzf "$TAR_FILE" -C "$RUNNER_TEMP/mpv-expanded"
+          MPV_APP="$(find "$RUNNER_TEMP/mpv-expanded" -type d -name mpv.app -print -quit)"
+          test -n "$MPV_APP"
+          test -x "$MPV_APP/Contents/MacOS/mpv"
+          "$MPV_APP/Contents/MacOS/mpv" --version
+          echo "MPV_APP=$MPV_APP" >> "$GITHUB_ENV"
+      - name: Create H264 MP3 transport and verify native mpv decode over PS3 proxy
+        shell: bash
+        run: |
+          set -euxo pipefail
+          command -v ffmpeg || brew install ffmpeg
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i 'testsrc2=size=640x360:rate=30' \
+            -f lavfi -i 'sine=frequency=440:sample_rate=48000' \
+            -t 9 -c:v libx264 -preset ultrafast -profile:v baseline \
+            -level 3.1 -b:v 1800k -pix_fmt yuv420p \
+            -c:a libmp3lame -b:a 192k -ac 2 -f mpegts \
+            tools/ps3-lab-windows/tests/fixture.ts
+          python tools/ps3-lab-windows/tests/player_smoke.py \
+            tools/ps3-lab-windows/tests/fixture.ts "$MPV_APP/Contents/MacOS/mpv"
+      - name: Freeze Apple Silicon native .app with bundled mpv
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m PyInstaller --noconfirm --clean --windowed --onedir \
+            --target-arch arm64 \
+            --osx-bundle-identifier com.jellyfin.ps3stream \
+            --paths tools/ps3-lab-windows \
+            --name Jellyfin-PS3-Stream tools/ps3-lab-windows/app.py
+          APP="dist/Jellyfin-PS3-Stream.app"
+          test -x "$APP/Contents/MacOS/Jellyfin-PS3-Stream"
+          lipo -info "$APP/Contents/MacOS/Jellyfin-PS3-Stream"
+          test "$(lipo -archs "$APP/Contents/MacOS/Jellyfin-PS3-Stream")" = "arm64"
+          mkdir -p "$APP/Contents/Resources"
+          ditto "$MPV_APP" "$APP/Contents/Resources/mpv.app"
+          test -x "$APP/Contents/Resources/mpv.app/Contents/MacOS/mpv"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --verbose=2 "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist"
+      - name: ZIP Apple Silicon application and SHA256
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/mac-package"
+          FILE="Jellyfin-PS3-Stream-macOS-AppleSilicon.zip"
+          ditto -c -k --keepParent --sequesterRsrc \
+            dist/Jellyfin-PS3-Stream.app "$RUNNER_TEMP/mac-package/$FILE"
+          test "$(stat -f%z "$RUNNER_TEMP/mac-package/$FILE")" -gt 10000000
+          (cd "$RUNNER_TEMP/mac-package"; shasum -a 256 "$FILE" > SHA256SUMS-macOS.txt)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Jellyfin-PS3-Stream-macOS-AppleSilicon
+          path: ${{ runner.temp }}/mac-package/*
+          retention-days: 14
+      - name: Publish tested macOS prerelease
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          TAG="ps3-stream-mac-$GITHUB_RUN_ID"
+          gh release create "$TAG" \
+            "$RUNNER_TEMP/mac-package/Jellyfin-PS3-Stream-macOS-AppleSilicon.zip" \
+            "$RUNNER_TEMP/mac-package/SHA256SUMS-macOS.txt" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Jellyfin PS3 Stream macOS Apple Silicon ($TAG)" \
+            --notes "ARM64 .app with cinematic Jellyfin browsing, PS3 client protocol parity and real bundled mpv playback in a native Cocoa window controlled by IPC. PS3 timing is simulated, while instruction emulation requires separate RPCS3. Built and tested on GitHub-hosted macOS 15 Apple Silicon." \
+            --prerelease

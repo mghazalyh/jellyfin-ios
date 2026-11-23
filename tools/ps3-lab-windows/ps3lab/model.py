@@ -396,8 +396,9 @@ class Ps3Pipeline:
         # RSX upload/flip queue represents asynchronous GPU command scheduling.
         while self._present_credit_ms >= period:
             self._present_credit_ms -= period
+            vblank_time = self._at_ms - self._present_credit_ms
             self._vblanks += 1
-            while self._rsx_pending and self._rsx_pending[0] <= self._at_ms:
+            while self._rsx_pending and self._rsx_pending[0] <= vblank_time:
                 self._rsx_pending.popleft()
             if self._rsx_pending:
                 self._sync_waits += 1
@@ -407,16 +408,16 @@ class Ps3Pipeline:
             if self._rsx_pending and len(self._rsx_pending) >= max(1, self.profile.rsx_queue_depth):
                 self._flip_late += 1
                 continue
-            if self._at_ms - self._last_present_ms < frame_interval:
+            if vblank_time - self._last_present_ms < frame_interval:
                 continue
             rsx_ms = self.profile.rsx_upload_ms + self.profile.rsx_flip_ms
             # Frames held due to GPU upload are counted as missed flips.
             if rsx_ms > period:
                 self._flip_late += 1
-            self._rsx_pending.append(self._at_ms + rsx_ms)
+            self._rsx_pending.append(vblank_time + rsx_ms)
             self._frames -= 1
             self._displayed += 1
-            self._last_present_ms = self._at_ms
+            self._last_present_ms = vblank_time
         result = {
             "simulated_elapsed_ms": round(self._at_ms),
             "simulated_received_bytes": self._input_bytes,

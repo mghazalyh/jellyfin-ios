@@ -4,6 +4,7 @@ Uses no actual server, PS3, iPad or other user-owned machine.
 """
 from __future__ import annotations
 import io
+import os
 from pathlib import Path
 import sys
 import time
@@ -84,31 +85,41 @@ def main():
     lab = Ps3Lab(root)
     lab.client = Fixture()
     try:
+        print("GUI_STAGE=load_home", flush=True)
         lab.ui.navigate("home")
         pump_until(root, lambda: not lab.ui.home_pending)
         pump_until(root, lambda: lab.ui.hero_photo is not None)
         assert lab.ui.featured_item["Id"] == MOVIE["Id"]
         assert len(lab.ui.cards) >= 3
         assert lab.ui.video_host.winfo_id() > 0
+        print("GUI_STAGE=series_details", flush=True)
         lab.ui.show_details(SERIES)
         pump_until(root, lambda: bool(lab.ui.episodes))
         assert lab.ui.episodes[0]["Id"] == EPISODE["Id"]
+        print("GUI_STAGE=return_home", flush=True)
         lab.ui.navigate("home")
         pump_until(root, lambda: not lab.ui.home_pending)
         root.update_idletasks()
-        try:
-            target = Path(__file__).resolve().parent.parent / "ci-theater-screenshot.png"
-            image = ImageGrab.grab(bbox=(
-                root.winfo_rootx(), root.winfo_rooty(),
-                root.winfo_rootx() + root.winfo_width(),
-                root.winfo_rooty() + root.winfo_height(),
-            ))
-            image.save(target)
-            print("GUI_SCREENSHOT=" + str(target))
-        except (OSError, RuntimeError, ValueError) as exc:
-            print("GUI_SCREENSHOT_UNAVAILABLE=" + type(exc).__name__)
+        print("GUI_STAGE=ready", flush=True)
+        # Only capture the ephemeral GitHub-hosted Windows runner. macOS
+        # screen capture can prompt for Screen Recording consent and can show
+        # a human operator's desktop instead of just this test window.
+        if sys.platform == "win32" and os.environ.get("GITHUB_ACTIONS") == "true":
+            try:
+                target = Path(__file__).resolve().parent.parent / "ci-theater-screenshot.png"
+                image = ImageGrab.grab(bbox=(
+                    root.winfo_rootx(), root.winfo_rooty(),
+                    root.winfo_rootx() + root.winfo_width(),
+                    root.winfo_rooty() + root.winfo_height(),
+                ))
+                image.save(target)
+                print("GUI_SCREENSHOT=" + str(target), flush=True)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print("GUI_SCREENSHOT_UNAVAILABLE=" + type(exc).__name__, flush=True)
+        else:
+            print("GUI_SCREENSHOT_SKIPPED=not_windows_ci", flush=True)
         assert not [e for e in lab.events if e["event"] == "ui_pump_error"]
-        print("GUI_SMOKE_PASS: home, cinematic backdrops, posters, episodes, video HWND")
+        print("GUI_SMOKE_PASS: home, cinematic backdrops, posters, episodes, video host")
     finally:
         lab.close()
 

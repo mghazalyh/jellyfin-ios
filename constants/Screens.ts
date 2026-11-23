@@ -21,7 +21,8 @@ export const Screens = {
 	// Settings screens
 	SettingsTab: 'Settings',
 	SettingsScreen: 'SettingsScreen',
-	DevSettingsScreen: 'DevSettingsScreen'
+	DevSettingsScreen: 'DevSettingsScreen',
+	Ps3DiagnosticsScreen: 'Ps3DiagnosticsScreen'
 } as const;
 
 export type Screens = typeof Screens[keyof typeof Screens];

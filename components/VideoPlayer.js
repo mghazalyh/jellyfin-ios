@@ -12,12 +12,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 
 import { useStores } from '../hooks/useStores';
+import { beginPs3Playback, getPs3Generation, recordPs3Diagnostic } from '../utils/PS3Diagnostics';
 import { msToTicks } from '../utils/Time';
 
 const VideoPlayer = () => {
-	const { rootStore, mediaStore } = useStores();
+	const { rootStore, mediaStore, settingStore } = useStores();
 
 	const player = useRef(null);
+	const lastSampleAt = useRef(0);
+	const lastBufferState = useRef(null);
+	const lastError = useRef('');
+	const openedAt = useRef(0);
 	// Local player fullscreen state
 	const [ isPresenting, setIsPresenting ] = useState(false);
 	const [ isDismissing, setIsDismissing ] = useState(false);
@@ -33,13 +38,25 @@ const VideoPlayer = () => {
 
 	// Update the player when media type or uri changes
 	useEffect(() => {
-		if (mediaStore.type === MediaType.Video) {
+		if (mediaStore.type === MediaType.Video && mediaStore.uri) {
 			rootStore.set({ didPlayerCloseManually: true });
+			openedAt.current = Date.now();
+			lastSampleAt.current = 0;
+			lastBufferState.current = null;
+			lastError.current = '';
+			if (settingStore.isPs3DiagnosticEnabled) beginPs3Playback(mediaStore.uri);
 			player.current?.loadAsync({
 				uri: mediaStore.uri
 			}, {
 				positionMillis: mediaStore.getPositionMillis(),
 				shouldPlay: true
+			}).catch(error => {
+				console.error('[VideoPlayer] loadAsync failed', error);
+				if (settingStore.isPs3DiagnosticEnabled) {
+					recordPs3Diagnostic('player_load_error', {
+						generation: getPs3Generation(), reason: 'native_load_rejected'
+					});
+				}
 			});
 		}
 	}, [ mediaStore.type, mediaStore.uri ]);
@@ -91,8 +108,45 @@ const VideoPlayer = () => {
 			posterSource={{ uri: mediaStore.backdropUri }}
 			resizeMode='contain'
 			useNativeControls
-			onReadyForDisplay={openFullscreen}
-			onPlaybackStatusUpdate={({ isPlaying, positionMillis, didJustFinish }) => {
+			onReadyForDisplay={() => {
+				if (settingStore.isPs3DiagnosticEnabled) {
+					recordPs3Diagnostic('video_ready_for_display', {
+						generation: getPs3Generation(),
+						elapsedMs: Date.now() - openedAt.current
+					});
+				}
+				openFullscreen();
+			}}
+			onPlaybackStatusUpdate={status => {
+				if (!status || !status.isLoaded) {
+					const error = status?.error || 'not_loaded';
+					if (settingStore.isPs3DiagnosticEnabled && error !== lastError.current) {
+						lastError.current = error;
+						recordPs3Diagnostic('player_status_error', {
+							generation: getPs3Generation(), reason: 'native_unloaded'
+						});
+					}
+					return;
+				}
+				const { isPlaying, positionMillis, didJustFinish, isBuffering, playableDurationMillis, durationMillis } = status;
+				if (settingStore.isPs3DiagnosticEnabled) {
+					const now = Date.now();
+					if (lastBufferState.current !== isBuffering) {
+						lastBufferState.current = isBuffering;
+						recordPs3Diagnostic(isBuffering ? 'buffering_started' : 'buffering_ended', {
+							generation: getPs3Generation(), positionMs: positionMillis,
+							elapsedMs: now - openedAt.current
+						});
+					}
+					if (now - lastSampleAt.current >= 5000) {
+						lastSampleAt.current = now;
+						recordPs3Diagnostic('player_sample', {
+							generation: getPs3Generation(), playing: Boolean(isPlaying),
+							buffering: Boolean(isBuffering), positionMs: positionMillis,
+							playableMs: playableDurationMillis, durationMs: durationMillis
+						});
+					}
+				}
 				if (didJustFinish) {
 					rootStore.set({ didPlayerCloseManually: false });
 					closeFullscreen();
@@ -100,7 +154,7 @@ const VideoPlayer = () => {
 				}
 				mediaStore.set({
 					isPlaying: isPlaying,
-					positionTicks: msToTicks(positionMillis)
+					positionTicks: msToTicks(Number.isFinite(positionMillis) ? positionMillis : 0)
 				});
 			}}
 			onFullscreenUpdate={({ fullscreenUpdate }) => {
@@ -126,6 +180,11 @@ const VideoPlayer = () => {
 			}}
 			onError={e => {
 				console.error(e);
+				if (settingStore.isPs3DiagnosticEnabled) {
+					recordPs3Diagnostic('player_error', {
+						generation: getPs3Generation(), reason: 'native_video_error'
+					});
+				}
 				Alert.alert(e);
 			}}
 		/>

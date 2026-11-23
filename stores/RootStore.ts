@@ -20,6 +20,7 @@ import pkg from '../package.json';
 import { getAppName, getSafeDeviceName } from '../utils/Device';
 
 import { logger } from './middleware/logger';
+import { useSettingStore } from './SettingStore';
 
 type State = {
 	deviceId: string,
@@ -63,11 +64,11 @@ export const useRootStore = create<State & Actions>()(
 				})),
 				getSdk: () => new Jellyfin({
 					clientInfo: {
-						name: getAppName(),
-						version: nativeApplicationVersion || pkg.version
+						name: useSettingStore.getState().isPs3DiagnosticEnabled ? 'PS3' : getAppName(),
+						version: useSettingStore.getState().isPs3DiagnosticEnabled ? '0.1' : (nativeApplicationVersion || pkg.version)
 					},
 					deviceInfo: {
-						name: getSafeDeviceName(),
+						name: useSettingStore.getState().isPs3DiagnosticEnabled ? 'PS3' : getSafeDeviceName(),
 						id: _get().deviceId
 					}
 				}),

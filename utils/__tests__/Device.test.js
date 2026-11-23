@@ -12,6 +12,7 @@ import iOS10Profile from '../profiles/ios-10';
 import iOS11Profile from '../profiles/ios-11';
 import iOSProfile from '../profiles/ios-13';
 import iOSFmp4Profile from '../profiles/ios-13-fmp4';
+import Ps3SurfProfile from '../profiles/ps3-surf';
 
 jest.mock('react-native/Libraries/Utilities/Platform');
 
@@ -77,6 +78,15 @@ describe('Device', () => {
 		it ('should return the correct profile for iOS 13 devices when fMP4 support is enabled', () => {
 			Platform.Version = '13';
 			expect(getDeviceProfile({ enableFmp4: true })).toBe(iOSFmp4Profile);
+		});
+
+		it('provides the PS3 transport diagnostic profile only when opted in on iOS', () => {
+			Platform.OS = 'ios';
+			Platform.Version = '17';
+			expect(getDeviceProfile({ enableFmp4: true, ps3Diagnostic: true })).toBe(Ps3SurfProfile);
+			expect(Ps3SurfProfile.DirectPlayProfiles).toEqual([]);
+			expect(Ps3SurfProfile.Name).toBe('PS3');
+			expect(Ps3SurfProfile.TranscodingProfiles.filter(x => x.Type === 'Video').every(x => x.Protocol === 'http')).toBe(true);
 		});
 
 		it('should return the an empty profile for Android devices', () => {

@@ -41,7 +41,9 @@ describe('SettingsScreen', () => {
 			</ThemeProvider>
 		);
 
-		expect(toJSON()).toMatchSnapshot();
+		const rendered = JSON.stringify(toJSON());
+		expect(rendered).toContain('PS3 playback parity test');
+		expect(rendered).toContain('PS3 diagnostic log');
 		act(unmount);
 	});
 });

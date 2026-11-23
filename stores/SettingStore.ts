@@ -49,7 +49,10 @@ type State = {
 	isExperimentalNativeAudioPlayerEnabled: boolean,
 
 	/** EXPERIMENTAL: Is download support enabled */
-	isExperimentalDownloadsEnabled: boolean
+	isExperimentalDownloadsEnabled: boolean,
+
+	/** Opt-in PS3 transport and diagnostic emulation for iPad testing. */
+	isPs3DiagnosticEnabled: boolean
 }
 
 type Actions = {
@@ -76,6 +79,7 @@ const initialState: () => State = () => ({
 	isFmp4Enabled: true,
 	isExperimentalNativeAudioPlayerEnabled: false,
 	isExperimentalDownloadsEnabled: false,
+	isPs3DiagnosticEnabled: false,
 	systemThemeId: null
 });
 

@@ -16,6 +16,7 @@ import iOS10Profile from './profiles/ios-10';
 import iOS11Profile from './profiles/ios-11';
 import iOS13Profile from './profiles/ios-13';
 import iOS13Fmp4Profile from './profiles/ios-13-fmp4';
+import Ps3SurfProfile from './profiles/ps3-surf';
 
 /** Gets the app name used for API requests. */
 export function getAppName() {
@@ -45,8 +46,10 @@ export function getSafeDeviceName() {
 	return Device.modelName || 'Jellyfin iOS Device';
 }
 
-export function getDeviceProfile({ enableFmp4 = false } = {}): DeviceProfile {
+export function getDeviceProfile({ enableFmp4 = false, ps3Diagnostic = false } = {}): DeviceProfile {
 	if (Platform.OS === 'ios') {
+		// This profile changes server negotiation, not the iPad's physical decoder.
+		if (ps3Diagnostic) return Ps3SurfProfile;
 		if (compareVersions(String(Platform.Version), '11') < 0) {
 			return iOS10Profile;
 		} else if (compareVersions(String(Platform.Version), '13') < 0) {

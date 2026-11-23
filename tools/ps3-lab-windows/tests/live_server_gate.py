@@ -41,6 +41,7 @@ class Checks:
     library_ok: bool = False
     streaming_ok: bool = False
     seek_ok: bool = False
+    seek_requested: bool = False
     lifecycle_ok: bool = False
     live_checked: bool = False
     completed: list[str] = field(default_factory=list)
@@ -60,7 +61,8 @@ class Checks:
             return False
         if test_stream:
             return self.streaming_ok and self.lifecycle_ok and (
-                self.seek_ok if self.selected_type != "TvChannel" else True)
+                self.seek_ok if self.seek_requested and self.selected_type != "TvChannel"
+                else True)
         return True
 
     def as_dict(self, test_stream: bool, has_credentials: bool) -> dict:
@@ -73,8 +75,8 @@ class Checks:
             "checks": {
                 "public": self.public_ok, "authentication": self.authentication_ok,
                 "library": self.library_ok, "streaming": self.streaming_ok,
-                "session_seek": self.seek_ok, "playstate": self.lifecycle_ok,
-                "live_checked": self.live_checked,
+                "session_seek": self.seek_ok, "seek_requested": self.seek_requested,
+                "playstate": self.lifecycle_ok, "live_checked": self.live_checked,
             },
             "category_counts": self.category_counts,
             "transport_packets": self.transport_packets,
@@ -249,7 +251,8 @@ def run_stream_tests(client: JellyfinClient, item: dict,
             result.seek_ok = True
             result.completed.append("PlaySessionId/source continuity over seek")
         else:
-            result.seek_ok = True
+            # A skipped optional seek must never be reported as verified.
+            result.seek_ok = False
             result.skipped.append("seek-not-requested")
     except Exception as exc:
         result.fail("authenticated-stream", exc)
@@ -268,7 +271,7 @@ def run_stream_tests(client: JellyfinClient, item: dict,
 
 def execute(server: str, stream_test: bool, test_seek: bool,
             media: str) -> dict:
-    checks = Checks()
+    checks = Checks(seek_requested=test_seek)
     authenticated = available_test_credentials()
     try:
         check_network(server, checks)

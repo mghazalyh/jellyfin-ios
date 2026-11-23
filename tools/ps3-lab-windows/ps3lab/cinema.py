@@ -40,6 +40,7 @@ class CinematicUI(TheaterUI):
         self.home_generation = 0
         self.detail_generation = 0
         self.current_view = "home"
+        self.episodes = []
         self.home_scroll_width = 1040
         super()._build()
         self._build_home()
@@ -62,6 +63,86 @@ class CinematicUI(TheaterUI):
     def _focus_search(self, _event):
         self.search_entry.focus_set()
         return "break"
+
+    def _player_page(self, parent):
+        """Playback stays embedded in the same cinematic desktop window."""
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", pady=(2, 11))
+        self._btn(top, "‹  Library", self.back_to_library).pack(side="left")
+        self._label(top, textvariable=self.player_title,
+                    size=15, bold=True).pack(side="left", padx=19)
+        self._btn(top, "Fullscreen  ⛶", self.fullscreen).pack(side="right")
+
+        screen = tk.Frame(parent, bg="#000000", highlightbackground=BORDER,
+                          highlightthickness=1)
+        screen.pack(fill="both", expand=True)
+        self.video_host = tk.Frame(screen, bg="#000000")
+        self.video_host.pack(fill="both", expand=True)
+        self.video_host.update_idletasks()
+
+        bottom = tk.Frame(parent, bg=SURFACE, padx=15, pady=8)
+        bottom.pack(fill="x", pady=(9, 0))
+        timeline = tk.Frame(bottom, bg=SURFACE)
+        timeline.pack(fill="x")
+        self.time_left = tk.StringVar(value="00:00")
+        self.time_right = tk.StringVar(value="00:00")
+        self._label(timeline, textvariable=self.time_left, size=10, color=MUTED).pack(
+            side="left", padx=(0, 7))
+        self.progress = tk.DoubleVar(value=0)
+        self._dragging = False
+        self.timeline = tk.Scale(
+            timeline, from_=0, to=1, resolution=1, variable=self.progress,
+            orient="horizontal", showvalue=False, highlightthickness=0,
+            bg=SURFACE, fg=WHITE, troughcolor="#555368", bd=0,
+            activebackground=ACCENT, sliderrelief="flat")
+        self.timeline.pack(side="left", fill="x", expand=True)
+        self.timeline.bind("<ButtonPress-1>", self._scrub_start)
+        self.timeline.bind("<ButtonRelease-1>", self._scrub_end)
+        self._label(timeline, textvariable=self.time_right, size=10, color=MUTED).pack(
+            side="left", padx=(7, 0))
+        controls = tk.Frame(bottom, bg=SURFACE)
+        controls.pack(fill="x", pady=(4, 0))
+        self._btn(controls, "↶ 10s", lambda: self.lab.player_command("back")).pack(
+            side="left", padx=(0, 5))
+        self._btn(controls, "▶ / ❚❚", lambda: self.lab.player_command("pause"), True).pack(
+            side="left", padx=(0, 5))
+        self._btn(controls, "30s ↷", lambda: self.lab.player_command("forward")).pack(
+            side="left", padx=(0, 5))
+        self._btn(controls, "■  Stop", self.lab.stop).pack(side="left")
+        self._label(controls, "Volume", 10, MUTED).pack(side="left", padx=(24, 9))
+        tk.Scale(controls, from_=0, to=100, orient="horizontal",
+                 length=125, variable=self.volume, command=self.change_volume,
+                 bg=SURFACE, fg=WHITE, showvalue=False,
+                 highlightthickness=0, troughcolor=BORDER).pack(side="left")
+        self._btn(controls, "PS3 Diagnostics",
+                  lambda: self.navigate("diagnostics")).pack(side="right")
+        self._label(parent, textvariable=self.lab.summary, size=9, color=MUTED).pack(
+            anchor="w", pady=(6, 2))
+
+    def _scrub_start(self, _event):
+        self._dragging = True
+
+    def _scrub_end(self, _event):
+        self._dragging = False
+        self.lab.seek_to_seconds(self.progress.get())
+
+    def update_playback_position(self, position_ticks, duration_ticks):
+        try:
+            position = max(0, float(position_ticks or 0) / 10000000.0)
+            duration = max(0, float(duration_ticks or 0) / 10000000.0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        self.time_left.set(self._clock(position))
+        self.time_right.set(self._clock(duration))
+        self.timeline.configure(to=max(1, int(duration)))
+        if not self._dragging:
+            self.progress.set(min(position, duration) if duration else position)
+
+    @staticmethod
+    def _clock(seconds):
+        total = max(0, int(seconds or 0))
+        return f"{total // 3600:02}:{total // 60 % 60:02}:{total % 60:02}" if total >= 3600 else (
+            f"{total // 60:02}:{total % 60:02}")
 
     def _build_home(self):
         page = tk.Frame(self.workspace, bg=BG)
@@ -415,6 +496,7 @@ class CinematicUI(TheaterUI):
         for child in self.detail_content.winfo_children():
             child.destroy()
         episodes = [x for x in data.get("Items", []) if x.get("Id")]
+        self.episodes = episodes
         self._label(self.detail_content, f"Episodes · {len(episodes)} available",
                     17, WHITE, True).pack(anchor="w", pady=(0, 8))
         if error:
@@ -457,6 +539,10 @@ class CinematicUI(TheaterUI):
         if not self.detail_item:
             return
         if self.detail_item.get("Type") == "Series":
+            if self.episodes:
+                self._play_item(self.episodes[0])
+            else:
+                self.lab.status.set("No playable episodes have loaded")
             return
         self._play_item(self.detail_item)
 

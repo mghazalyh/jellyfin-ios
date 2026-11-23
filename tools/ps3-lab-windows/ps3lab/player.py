@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import socket
+import sys
 import time
 import uuid
 
@@ -19,22 +21,34 @@ def new_ipc_path() -> str:
     return "/tmp/" + identifier + ".sock"
 
 
-def build_mpv_args(executable: str, url: str, window_id: int, ipc_path: str) -> list[str]:
+def build_mpv_args(executable: str, url: str, window_id: int, ipc_path: str,
+                   platform: str | None = None) -> list[str]:
     if not executable or not url.startswith("http://127.0.0.1:"):
         raise ValueError("mpv requires an executable and a private loopback URL")
-    if not isinstance(window_id, int) or window_id <= 0:
+    platform = sys.platform if platform is None else platform
+    is_mac = platform == "darwin"
+    if not is_mac and (not isinstance(window_id, int) or window_id <= 0):
         raise ValueError("video host must have a valid native window handle")
     if not ipc_path:
         raise ValueError("mpv requires a unique IPC endpoint")
-    handle = window_id & 0xffffffff if os.name == "nt" else window_id
-    return [
+    handle = window_id & 0xffffffff if platform == "win32" else window_id
+    args = [
         executable, "--no-config", "--no-terminal", "--force-window=immediate",
         "--keep-open=no", "--hwdec=auto-safe", "--cache=yes", "--cache-secs=3",
         "--osc=no", "--input-default-bindings=no", "--input-vo-keyboard=no",
         "--cursor-autohide=always", "--idle=no", "--audio-display=no",
-        "--title=Jellyfin PS3 Stream", "--wid=" + str(handle),
-        "--input-ipc-server=" + ipc_path, url,
+        "--title=Jellyfin PS3 Stream",
+        "--input-ipc-server=" + ipc_path,
     ]
+    if is_mac:
+        # Cocoa cannot re-parent foreign processes into the tkinter NSView.
+        # Use an actual native mpv window with its own playback controls.
+        args.extend(["--osc=yes", "--input-vo-keyboard=yes",
+                     "--ontop=no", "--vo=gpu-next"])
+    else:
+        args.append("--wid=" + str(handle))
+    args.append(url)
+    return args
 
 
 def encode_command(parts: list, request_id: int | None = None) -> bytes:
@@ -59,29 +73,55 @@ def ipc_command(path: str, parts: list) -> dict:
     last_error = None
     for attempt in range(12):
         try:
-            with open(path, "r+b", buffering=0) as connection:
-                connection.write(payload)
-                for _ in range(80):
-                    message = connection.readline(65536)
-                    if not message:
-                        raise RuntimeError("mpv closed the IPC channel")
-                    try:
-                        reply = json.loads(message.decode("utf-8"))
-                    except (ValueError, UnicodeError):
-                        continue
-                    if reply.get("request_id") != request_id:
-                        continue
-                    if reply.get("error") != "success":
-                        raise RuntimeError("mpv command rejected: " +
-                                           str(reply.get("error")))
-                    return reply
-                raise RuntimeError("mpv did not acknowledge the command")
-        except OSError as exc:
+            if os.name == "nt":
+                # Windows mpv is a named pipe; Python's file IO is correct.
+                connection = open(path, "r+b", buffering=0)
+                try:
+                    connection.write(payload)
+                    for _ in range(80):
+                        message = connection.readline(65536)
+                        if not message:
+                            raise RuntimeError("mpv closed the IPC channel")
+                        try:
+                            reply = json.loads(message.decode("utf-8"))
+                        except (ValueError, UnicodeError):
+                            continue
+                        if reply.get("request_id") == request_id:
+                            if reply.get("error") != "success":
+                                raise RuntimeError("mpv command rejected: " +
+                                                   str(reply.get("error")))
+                            return reply
+                    raise RuntimeError("mpv did not acknowledge the command")
+                finally:
+                    connection.close()
+            else:
+                # mpv IPC on macOS/Linux is an AF_UNIX SOCKET, not a regular
+                # file. open("r+b") would raise ENXIO on a socket inode.
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(4.0)
+                    client.connect(path)
+                    client.sendall(payload)
+                    with client.makefile("rb") as stream:
+                        for _ in range(80):
+                            message = stream.readline(65536)
+                            if not message:
+                                raise RuntimeError("mpv closed the IPC socket")
+                            try:
+                                reply = json.loads(message.decode("utf-8"))
+                            except (ValueError, UnicodeError):
+                                continue
+                            if reply.get("request_id") == request_id:
+                                if reply.get("error") != "success":
+                                    raise RuntimeError("mpv command rejected: " +
+                                                       str(reply.get("error")))
+                                return reply
+                        raise RuntimeError("mpv did not acknowledge the command")
+        except (OSError, TimeoutError) as exc:
             last_error = exc
             if attempt == 11:
                 break
             time.sleep(0.1)
-    raise RuntimeError("mpv pipe unavailable (" +
+    raise RuntimeError("mpv IPC unavailable (" +
                        type(last_error).__name__ + ")")
 
 

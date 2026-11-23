@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from .parity import stream_query, video_mode
 
 PS3_USER_AGENT = "JellyfinPS3/0.1"
 PS3_CLIENT = "PS3"
@@ -32,7 +33,8 @@ class PlaybackSession:
     start_ticks: int = 0
     duration_ticks: int = 0
 
-def ps3_device_profile(hd: bool = False, surround: bool = False) -> dict:
+def ps3_device_profile(hd: bool = False, surround: bool = False,
+                       surround_hd: bool = False) -> dict:
     """Match the default 720p stereo body_sd of api_detail.cpp.
 
     The 1080p and AC-3 variants use the same exact request structure but
@@ -42,9 +44,9 @@ def ps3_device_profile(hd: bool = False, surround: bool = False) -> dict:
     width, height, ceiling, level = (1920, 1080, 10000000, "42") if hd else (
         1280, 720, 8000000, "31"
     )
-    audio_codec, channels, audio_bitrate = ("ac3", 6, 640000) if surround else (
-        "mp3", 2, 192000
-    )
+    audio_codec = ("ac3,mp3,dts,truehd" if surround_hd and surround else
+                   "ac3,mp3" if surround else "mp3")
+    channels = 8 if surround_hd and surround else 6 if surround else 2
     profile = "high|main|baseline" if hd else "baseline"
     def condition(property_name: str, value: str, operator="LessThanEqual", required=True):
         return {"Condition": operator, "Property": property_name, "Value": value,
@@ -66,9 +68,19 @@ def ps3_device_profile(hd: bool = False, surround: bool = False) -> dict:
                 condition("Height", str(height)),
                 condition("VideoBitrate", str(10000000 if hd else 4000000))
             ]},
-            {"Type": "VideoAudio", "Codec": audio_codec, "Conditions": [
-                condition("AudioChannels", str(channels), required=False),
-                condition("AudioSampleRate", "48000", "Equals", required=False)
+        ] + ([
+            {"Type": "VideoAudio", "Codec": "dts,truehd", "Conditions": [
+                condition("AudioChannels", "8", required=False),
+            ]}
+        ] if surround and surround_hd else []) + ([
+            {"Type": "VideoAudio", "Codec": "ac3", "Conditions": [
+                condition("AudioChannels", "6", required=False),
+                condition("AudioSampleRate", "48000", "Equals", required=False),
+            ]}
+        ] if surround else []) + [
+            {"Type": "VideoAudio", "Codec": "mp3", "Conditions": [
+                condition("AudioChannels", "2", required=False),
+                condition("AudioSampleRate", "48000", "Equals", required=False),
             ]}
         ],
         "ContainerProfiles": [],
@@ -85,39 +97,40 @@ def ps3_device_profile(hd: bool = False, surround: bool = False) -> dict:
 def build_stream_url(base: str, item_id: str, source_id: str, device_id: str,
                      play_session_id: str = "", live_stream_id: str = "",
                      live: bool = False, hd: bool = False, surround: bool = False,
-                     start_ticks: int = 0, quality_bps: int = 4000000) -> str:
-    """Preserve ordering / semantics in stream_request.cpp lines 179-206.
+                     start_ticks: int = 0, quality_bps: int = 4000000,
+                     quality: str = "auto", budget_audio: bool = True,
+                     hd_codec: str = "", ac3_copy: bool = False,
+                     reported_audio_bps: int = 0, no_video_copy: bool = False,
+                     audio_index: int = -1, subtitle_index: int = -1,
+                     subtitle_on_console: bool = False,
+                     display_width: int = 0, display_height: int = 0) -> str:
+    """Construct actual PS3 stream_request.cpp query and total bitrate budget.
 
-    Live requests always disable video stream copy. Transcoding profile High
-    is specifically used for Live TV; the 720p default is baseline otherwise.
+    quality_bps is a backward-compatible parameter; only enumerated console
+    quality modes are valid. The default mode follows the PS3 1080p toggle.
     """
     if not item_id or not source_id or not device_id:
         raise ValueError("item/source/device IDs are required")
-    if start_ticks < 0:
-        raise ValueError("start_ticks must be non-negative")
-    audio = "ac3" if surround else "mp3"
-    frame = "42" if hd else ("41" if live else "31")
-    video_profile = "high" if live or hd else "baseline"
-    width, height = (1920, 1080) if hd else (1280, 720)
+    if quality == "auto":
+        quality = {700000: "360p", 1500000: "480p",
+                   20000000: "1080p20", 25000000: "1080p25"}.get(
+                       quality_bps, "auto")
+    values = stream_query(
+        quality=quality, hd=hd, live=live, surround=surround,
+        hd_codec=hd_codec, ac3_copy=ac3_copy,
+        reported_audio_bps=reported_audio_bps, budget_audio=budget_audio,
+        no_video_copy=no_video_copy, display_width=display_width,
+        display_height=display_height, device_id=device_id,
+        source_id=source_id, start_ticks=start_ticks,
+        live_stream_id=live_stream_id, play_session_id=play_session_id,
+        audio_index=audio_index, subtitle_index=subtitle_index,
+        subtitle_on_console=subtitle_on_console,
+    )
+    query = urllib.parse.urlencode(values, quote_via=urllib.parse.quote)
     source_path = item_id if live else source_id
-    params = [
-        ("VideoCodec", "h264"), ("Profile", video_profile), ("Level", frame),
-        ("MaxWidth", width), ("MaxHeight", height),
-        ("VideoBitrate", quality_bps),
-        ("AllowVideoStreamCopy", "false" if live else "true"),
-        ("AudioCodec", audio), ("AudioBitrate", 640000 if surround else 192000),
-        ("AudioSampleRate", 48000), ("MaxAudioChannels", 6 if surround else 2),
-        ("MaxFramerate", 30), ("AllowAudioStreamCopy", "false"),
-        ("DeviceId", device_id), ("Static", "false"),
-        ("MediaSourceId", source_id), ("StartTimeTicks", start_ticks)
-    ]
-    if live_stream_id:
-        params.append(("LiveStreamId", live_stream_id))
-    if play_session_id:
-        params.append(("PlaySessionId", play_session_id))
-    query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     path = urllib.parse.quote(source_path, safe="")
     return f"{base.rstrip('/')}/Videos/{path}/stream.ts?{query}"
+
 
 class JellyfinClient:
     def __init__(self, base_url: str, device_id: str | None = None):
@@ -353,7 +366,8 @@ class JellyfinClient:
             return b""
 
     def playback_info(self, item_id: str, hd=False, surround=False,
-                      source_id="", live=False, start_ticks=0) -> dict:
+                      source_id="", live=False, start_ticks=0,
+                      surround_hd=False) -> dict:
         if not self.user_id:
             raise JellyfinError("not authenticated")
         params = [
@@ -366,17 +380,23 @@ class JellyfinClient:
             params.append(("MediaSourceId", source_id))
         url = "Items/" + urllib.parse.quote(item_id, safe="") + "/PlaybackInfo?"
         url += urllib.parse.urlencode(params)
-        return self.request(url, "POST", {"DeviceProfile": ps3_device_profile(hd, surround)}, timeout=90)
+        return self.request(url, "POST", {"DeviceProfile": ps3_device_profile(hd, surround,
+                                                     surround_hd)}, timeout=90)
 
     def make_session(self, item: dict, hd=False, surround=False,
-                     quality_bps=4000000, source_id="", start_ticks=0) -> PlaybackSession:
+                     quality_bps=4000000, source_id="", start_ticks=0,
+                     quality="auto", budget_audio=True, no_video_copy=False,
+                     hd_codec="", ac3_copy=False, reported_audio_bps=0,
+                     audio_index=-1, subtitle_index=-1,
+                     subtitle_on_console=False) -> PlaybackSession:
         item_id = item.get("Id") or ""
         if not item_id:
             raise JellyfinError("selected item has no Id")
         live = item.get("Type") == "TvChannel"
         start_ticks = 0 if live else max(0, int(start_ticks or 0))
         response = self.playback_info(item_id, hd=hd, surround=surround, live=live,
-                                      source_id=source_id, start_ticks=start_ticks)
+                                      source_id=source_id, start_ticks=start_ticks,
+                                      surround_hd=bool(hd_codec))
         sources = response.get("MediaSources") or []
         if not sources:
             raise JellyfinError("PlaybackInfo returned no MediaSources")
@@ -387,7 +407,12 @@ class JellyfinClient:
         liveid = selected.get("LiveStreamId") or ""
         link = build_stream_url(
             self.base_url, item_id, sid, self.device_id, playid, liveid, live,
-            hd, surround, start_ticks=start_ticks, quality_bps=quality_bps)
+            hd, surround, start_ticks=start_ticks, quality_bps=quality_bps,
+            quality=quality, budget_audio=budget_audio,
+            no_video_copy=no_video_copy, hd_codec=hd_codec,
+            ac3_copy=ac3_copy, reported_audio_bps=reported_audio_bps,
+            audio_index=audio_index, subtitle_index=subtitle_index,
+            subtitle_on_console=subtitle_on_console)
         return PlaybackSession(
             item_id=item_id, source_id=sid, play_session_id=playid,
             live_stream_id=liveid, live=live, title=item.get("Name") or "Untitled",

@@ -5,7 +5,9 @@ import {
 } from '../PS3Diagnostics';
 
 describe('PS3 diagnostics', () => {
-	beforeEach(async () => { await clearPs3Diagnostics(); });
+	beforeEach(async () => {
+		await clearPs3Diagnostics();
+	});
 
 	it('classifies PS3 TS, HLS and Jellyfin stream paths without storing credentials', () => {
 		expect(classifyPlaybackRoute('http://server:8103/live/all.ts?api_key=SECRET')).toBe('ps3-continuous-ts');

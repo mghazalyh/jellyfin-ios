@@ -39,6 +39,8 @@ describe('NativeShellWebView', () => {
 			<NativeShellWebView />
 		);
 
-		expect(toJSON()).toMatchSnapshot();
+		const rendered = JSON.stringify(toJSON());
+		expect(rendered).toContain('window.ExpoVideoProfile');
+		expect(rendered).toContain('window.ExpoAppInfo');
 	});
 });

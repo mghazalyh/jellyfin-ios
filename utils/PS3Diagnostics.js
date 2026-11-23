@@ -40,14 +40,14 @@ function hash(value) {
 export function classifyPlaybackRoute(url) {
 	try {
 		const pathname = new URL(String(url || ''), 'https://invalid.local').pathname.toLowerCase();
-		if (/\/api\/surf\/(all|sports|movies-series)/.test(pathname)) return 'surf-control';
-		if (/\/live\/(all|sports|movies-series)\.ts/.test(pathname)) return 'ps3-continuous-ts';
-		if (/\/hls\//.test(pathname) || /\.m3u8$/.test(pathname)) return 'hls';
-		if (/\/(playlist\.ts\.m3u|livetv\/livestreamfiles)/.test(pathname)) return 'livetv';
-		if (/\/(videos|audio)\//.test(pathname) && /\.(ts|mpegts)$/.test(pathname)) return 'http-ts';
-		if (/\/(videos|audio)\//.test(pathname) && /\.(mp4|m4v)$/.test(pathname)) return 'http-mp4';
-		if (/\/(videos|audio)\//.test(pathname)) return 'jellyfin-media';
-		if (/\/playbackinfo/.test(pathname)) return 'playback-info';
+		if (//api/surf/(all|sports|movies-series)/.test(pathname)) return 'surf-control';
+		if (//live/(all|sports|movies-series)\.ts/.test(pathname)) return 'ps3-continuous-ts';
+		if (//hls//.test(pathname) || /\.m3u8$/.test(pathname)) return 'hls';
+		if (//(playlist\.ts\.m3u|livetv/livestreamfiles)/.test(pathname)) return 'livetv';
+		if (//(videos|audio)//.test(pathname) && /\.(ts|mpegts)$/.test(pathname)) return 'http-ts';
+		if (//(videos|audio)//.test(pathname) && /\.(mp4|m4v)$/.test(pathname)) return 'http-mp4';
+		if (//(videos|audio)//.test(pathname)) return 'jellyfin-media';
+		if (//playbackinfo/.test(pathname)) return 'playback-info';
 		return 'other';
 	} catch (error) {
 		console.warn('[PS3 diagnostics] Unable to classify route', String(error));
@@ -70,8 +70,8 @@ function scrub(input) {
 	if (typeof input !== 'string') return null;
 	// All data fields are already semantic labels, but reject accidental URLs
 	// and credentials even if a future caller passes untrusted text.
-	if (/[:][\/][\/]|(?:token|password|authorization|apikey|api_key)[=:]/i.test(input)) return 'redacted';
-	return input.replace(/[^a-zA-Z0-9_\/. -]/g, '').slice(0, 72);
+	if (/[:][/][/]|(?:token|password|authorization|apikey|api_key)[=:]/i.test(input)) return 'redacted';
+	return input.replace(/[^a-zA-Z0-9_/. -]/g, '').slice(0, 72);
 }
 
 export function recordPs3Diagnostic(type, payload = {}) {
@@ -89,9 +89,15 @@ export function recordPs3Diagnostic(type, payload = {}) {
 			...data
 		};
 		events.push(record);
-		if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
+		if (events.length > MAX_EVENTS) {
+			events = events.slice(-MAX_EVENTS);
+		}
 		for (const fn of listeners) {
-			try { fn(); } catch (error) { console.warn('[PS3 diagnostics] Listener error', error); }
+			try {
+				fn();
+			} catch (error) {
+				console.warn('[PS3 diagnostics] Listener error', error);
+			}
 		}
 		pendingWrites++;
 		if (pendingWrites >= 8 || /error|failure|stalled/.test(record.type)) {
@@ -159,8 +165,10 @@ export function persistPs3Diagnostics() {
 		try {
 			await AsyncStorage.setItem(KEY, encoded);
 			lastPersisted = Date.now();
+			return true;
 		} catch (error) {
 			console.warn('[PS3 diagnostics] Persist failed', error);
+			return false;
 		}
 	});
 	return writeChain;
@@ -172,7 +180,11 @@ export async function clearPs3Diagnostics() {
 	pendingWrites = 0;
 	await persistPs3Diagnostics();
 	for (const fn of listeners) {
-		try { fn(); } catch (error) { console.warn('[PS3 diagnostics] Listener error', error); }
+		try {
+			fn();
+		} catch (error) {
+			console.warn('[PS3 diagnostics] Listener error', error);
+		}
 	}
 }
 

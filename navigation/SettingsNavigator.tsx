@@ -12,8 +12,8 @@ import { useTranslation } from 'react-i18next';
 
 import { Screens } from '../constants/Screens';
 import DevSettingsScreen from '../screens/DevSettingsScreen';
-import SettingsScreen from '../screens/SettingsScreen';
 import Ps3DiagnosticsScreen from '../screens/Ps3DiagnosticsScreen';
+import SettingsScreen from '../screens/SettingsScreen';
 
 export type SettingsStackParams = {
 	[Screens.SettingsScreen]: undefined;

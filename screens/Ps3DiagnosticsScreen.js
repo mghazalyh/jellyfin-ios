@@ -6,6 +6,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import Colors from '../constants/Colors';
 import { Screens } from '../constants/Screens';
 import { useStores } from '../hooks/useStores';
 import {
@@ -49,8 +50,12 @@ const Ps3DiagnosticsScreen = () => {
 				text: 'Clear',
 				style: 'destructive',
 				onPress: async () => {
-				try { await clearPs3Diagnostics(); refresh(); }
-				catch (error) { console.error('[PS3 diagnostics] Clear failed', error); }
+				try {
+						await clearPs3Diagnostics();
+						refresh();
+					} catch (error) {
+						console.error('[PS3 diagnostics] Clear failed', error);
+					}
 				}
 			}
 		]
@@ -63,7 +68,7 @@ const Ps3DiagnosticsScreen = () => {
 				<Text style={styles.line}>PS3 reference: {PS3_REFERENCE}</Text>
 				<Text style={styles.line}>Mode: {settingStore.isPs3DiagnosticEnabled ? 'Enabled' : 'Disabled'}</Text>
 				<Text style={styles.line}>Captured events: {events.length}</Text>
-				<Text style={styles.note}>The iPad can test Jellyfin's HTTP MPEG-TS routing, playback startup, buffering and reported ready-for-display events. It cannot reproduce PS3 RSX flips, CellAudio DMA or PS3 memory pressure. Source epochs in iPad logs are observational, not proof that the server changed its transport source.</Text>
+				<Text style={styles.note}>The iPad can test Jellyfin HTTP MPEG-TS routing, playback startup, buffering and reported ready-for-display events. It cannot reproduce PS3 RSX flips, CellAudio DMA or PS3 memory pressure. Source epochs in iPad logs are observational, not proof that the server changed its transport source.</Text>
 				<View style={styles.buttons}>
 					<Button title='Refresh' onPress={refresh} />
 					<Button title='Export redacted JSON' onPress={exportLog} disabled={busy} />
@@ -80,14 +85,14 @@ const Ps3DiagnosticsScreen = () => {
 	);
 };
 const styles = StyleSheet.create({
-	page: { flex: 1, backgroundColor: '#101010' },
+	page: { flex: 1, backgroundColor: Colors.blackish },
 	content: { padding: 16, paddingBottom: 48 },
-	title: { color: '#fff', fontSize: 20, fontWeight: '600', marginBottom: 12 },
-	line: { color: '#fff', marginBottom: 7 },
-	note: { color: '#ddd', marginTop: 10, marginBottom: 18, lineHeight: 22 },
+	title: { color: Colors.white, fontSize: 20, fontWeight: '600', marginBottom: 12 },
+	line: { color: Colors.white, marginBottom: 7 },
+	note: { color: Colors.grey1, marginTop: 10, marginBottom: 18, lineHeight: 22 },
 	buttons: { marginBottom: 16 },
-	heading: { color: '#fff', fontSize: 17, fontWeight: '600', marginBottom: 10 },
-	event: { color: '#cbd4dd', fontSize: 11, marginBottom: 8, fontFamily: 'Courier' }
+	heading: { color: Colors.white, fontSize: 17, fontWeight: '600', marginBottom: 10 },
+	event: { color: Colors.grey1, fontSize: 11, marginBottom: 8, fontFamily: 'Courier' }
 });
 Ps3DiagnosticsScreen.displayName = Screens.Ps3DiagnosticsScreen;
 export default Ps3DiagnosticsScreen;

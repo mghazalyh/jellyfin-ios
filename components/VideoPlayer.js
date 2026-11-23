@@ -12,8 +12,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 
 import { useStores } from '../hooks/useStores';
-import { msToTicks } from '../utils/Time';
 import { beginPs3Playback, getPs3Generation, recordPs3Diagnostic } from '../utils/PS3Diagnostics';
+import { msToTicks } from '../utils/Time';
 
 const VideoPlayer = () => {
 	const { rootStore, mediaStore, settingStore } = useStores();

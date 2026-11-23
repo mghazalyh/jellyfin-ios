@@ -19,10 +19,10 @@ import { LEGACY_AUTHORIZATION_PARAMETER } from '../constants/api';
 import { useStores } from '../hooks/useStores';
 import DownloadModel from '../models/DownloadModel';
 import { getAppName, getDeviceProfile, getSafeDeviceName } from '../utils/Device';
-import StaticScriptLoader from '../utils/StaticScriptLoader';
-import { openBrowser } from '../utils/WebBrowser';
 import { classifyPlaybackRoute, fingerprintPlaybackRoute, recordPs3Diagnostic } from '../utils/PS3Diagnostics';
 import ps3WebHook from '../utils/PS3WebTrace';
+import StaticScriptLoader from '../utils/StaticScriptLoader';
+import { openBrowser } from '../utils/WebBrowser';
 
 import RefreshWebView, { type RefreshWebViewProps } from './RefreshWebView';
 

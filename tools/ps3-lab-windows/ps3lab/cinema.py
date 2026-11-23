@@ -41,6 +41,8 @@ class CinematicUI(TheaterUI):
         self.detail_generation = 0
         self.current_view = "home"
         self.episodes = []
+        self.selected_source_id = ""
+        self.source_buttons = []
         self.home_scroll_width = 1040
         super()._build()
         self._build_home()
@@ -259,6 +261,8 @@ class CinematicUI(TheaterUI):
         self.episode_header.pack(fill="x", padx=12, pady=(8, 4))
         self._label(self.episode_header, "Episodes and media", 17, WHITE, True).pack(
             side="left")
+        self.source_panel = tk.Frame(page, bg=BG)
+        self.source_panel.pack(fill="x", padx=12, pady=(0, 6))
         self.detail_content = tk.Frame(page, bg=BG)
         self.detail_content.pack(fill="both", expand=True, padx=12)
         self._label(self.detail_content, "Select a title to explore.",
@@ -461,6 +465,9 @@ class CinematicUI(TheaterUI):
         generation = self.detail_generation
         self.detail_item = item
         self.selected_item = item
+        self.selected_source_id = ""
+        for child in self.source_panel.winfo_children():
+            child.destroy()
         self.current_view = "detail"
         self._set_hero(self.detail_ids, item, detail=True)
         self.heading.configure(text="Title details")
@@ -488,6 +495,54 @@ class CinematicUI(TheaterUI):
                 anchor="w")
         self.activate("detail")
         self._request_backdrop(self.generation, "detail", item)
+        if item.get("Type") in ("Movie", "Episode"):
+            item_id = item["Id"]
+            def fetch_sources():
+                try:
+                    details = self.lab.client.item_details(item_id)
+                    return ("cinema_sources", (generation, item_id,
+                                              details.get("MediaSources") or [], ""))
+                except Exception as exc:
+                    return ("cinema_sources", (generation, item_id,
+                                              item.get("MediaSources") or [],
+                                              type(exc).__name__))
+            self.lab.worker(fetch_sources)
+
+    def show_sources(self, generation, item_id, sources, error):
+        if (self._closed or generation != self.detail_generation or
+                not self.detail_item or self.detail_item.get("Id") != item_id):
+            return
+        for child in self.source_panel.winfo_children():
+            child.destroy()
+        self.source_buttons.clear()
+        if not isinstance(sources, list) or len(sources) < 2:
+            self.selected_source_id = ""
+            return
+        self._label(self.source_panel, "STREAM SOURCES", 10, MUTED, True).pack(
+            side="left", padx=(0, 13))
+        for idx, source in enumerate(sources[:8]):
+            if not isinstance(source, dict) or not source.get("Id"):
+                continue
+            codec = str(source.get("Container") or "media").upper()[:10]
+            try:
+                bps = int(source.get("Bitrate") or 0) // 1000000
+            except (TypeError, ValueError):
+                bps = 0
+            descriptor = "Source " + str(idx + 1) + " • " + codec
+            if bps:
+                descriptor += " • " + str(bps) + "Mbps"
+            source_id = str(source["Id"])
+            button = self._btn(self.source_panel, descriptor,
+                               lambda sid=source_id: self.select_source(sid))
+            button.pack(side="left", padx=3)
+            self.source_buttons.append((source_id, button))
+        if self.source_buttons:
+            self.select_source(self.source_buttons[0][0])
+
+    def select_source(self, source_id):
+        self.selected_source_id = str(source_id or "")
+        for sid, button in self.source_buttons:
+            button.configure(bg=ACCENT if sid == self.selected_source_id else SURFACE2)
 
     def show_episodes(self, generation, series_id, data, error):
         if (self._closed or generation != self.detail_generation or

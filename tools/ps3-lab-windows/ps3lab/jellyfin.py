@@ -284,6 +284,17 @@ class JellyfinClient:
             "StartIndex": start,
         }
 
+    def item_details(self, item_id: str) -> dict:
+        """Fetch all available media sources for the title detail page."""
+        if not self.user_id or not item_id:
+            raise JellyfinError("authentication and item id are required")
+        user_id = urllib.parse.quote(self.user_id, safe="")
+        item_id = urllib.parse.quote(str(item_id), safe="")
+        details = self.request(f"Users/{user_id}/Items/{item_id}", timeout=35)
+        if not isinstance(details, dict):
+            raise JellyfinError("Jellyfin item details are invalid")
+        return details
+
     def series_episodes(self, series_id: str) -> dict:
         """List real seasons/episodes using Jellyfin's dedicated Shows endpoint."""
         if not self.user_id or not series_id:

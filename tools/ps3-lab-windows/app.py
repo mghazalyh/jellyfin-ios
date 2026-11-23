@@ -57,6 +57,7 @@ class Ps3Lab:
         self.client = None
         self.session = None
         self.current_item = None
+        self.current_source_id = ""
         self.prepare_generation = 0
         self.proxy = None
         self.player = None
@@ -259,18 +260,24 @@ class Ps3Lab:
             self.ui.show_details(item)
             return
         self.current_item = item
+        self.current_source_id = (self.ui.selected_source_id
+            if self.ui.detail_item and self.ui.detail_item.get("Id") == item.get("Id")
+            else "")
         if not probe:
             self.ui.show_player(item)
         self.prepare_generation += 1
         request_id = self.prepare_generation
         hd, surround = self.hd.get(), self.surround.get()
         start_ticks = 0 if probe else self.item_resume_ticks(item)
-        self.worker(self.prepare, item, probe, hd, surround, start_ticks, request_id)
+        self.worker(self.prepare, item, probe, hd, surround, start_ticks,
+                    request_id, self.current_source_id)
 
-    def prepare(self, item, probe, hd, surround, start_ticks=0, request_id=0):
+    def prepare(self, item, probe, hd, surround, start_ticks=0, request_id=0,
+                source_id=""):
         session = self.client.make_session(
             item, hd=hd, surround=surround,
-            start_ticks=start_ticks, quality_bps=8000000 if hd else 4000000)
+            start_ticks=start_ticks, source_id=source_id,
+            quality_bps=8000000 if hd else 4000000)
         return "prepared", (request_id, session, probe, hd)
 
     def seek_to_seconds(self, seconds):
@@ -289,7 +296,8 @@ class Ps3Lab:
         item = self.current_item
         self.status.set("Seeking through Jellyfin playback negotiation")
         self.worker(self.prepare, item, False, self.hd.get(),
-                    self.surround.get(), requested, request_id)
+                    self.surround.get(), requested, request_id,
+                    self.current_source_id)
 
     def begin_stream(self, session, probe, hd):
         self.stop()
@@ -498,6 +506,9 @@ class Ps3Lab:
                     elif key == "home_result":
                         generation, category, data, error = result
                         self.ui.home_result(generation, category, data, error)
+                    elif key == "cinema_sources":
+                        generation, item_id, sources, error = result
+                        self.ui.show_sources(generation, item_id, sources, error)
                     elif key == "cinema_episodes":
                         generation, series_id, data, error = result
                         self.ui.show_episodes(generation, series_id, data, error)

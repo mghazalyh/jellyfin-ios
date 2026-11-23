@@ -156,6 +156,17 @@ const SettingsScreen = () => {
 			}
 		}
 
+		const ps3DiagnosticsData = [{
+			key: 'ps3-diagnostic-switch',
+			title: 'PS3 transport diagnostics (experimental)',
+			subtitle: 'Native HTTP MPEG-TS negotiation and local playback evidence',
+			value: settingStore.isPs3DiagnosticEnabled,
+			onValueChange: value => {
+				settingStore.set({ isPs3DiagnosticEnabled: value });
+				rootStore.set({ isReloadRequired: true });
+			}
+		}];
+
 		const appearanceSettingsData = [{
 			key: 'tab-labels-switch',
 			title: t('settings.tabLabels'),
@@ -207,6 +218,20 @@ const SettingsScreen = () => {
 				title: t('headings.playback'),
 				data: playbackSettingsData,
 				renderItem: SwitchListItem
+			},
+			{
+				title: 'PS3 playback parity test',
+				data: ps3DiagnosticsData,
+				renderItem: SwitchListItem
+			},
+			{
+				title: 'PS3 diagnostic log',
+				data: [{
+					key: 'ps3-diagnostic-log',
+					title: 'View, export or clear diagnostic evidence',
+					onPress: () => navigation.navigate(Screens.Ps3DiagnosticsScreen)
+				}],
+				renderItem: ButtonListItem
 			},
 			{
 				title: t('headings.downloads'),

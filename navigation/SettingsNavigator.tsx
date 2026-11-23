@@ -13,10 +13,12 @@ import { useTranslation } from 'react-i18next';
 import { Screens } from '../constants/Screens';
 import DevSettingsScreen from '../screens/DevSettingsScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+import Ps3DiagnosticsScreen from '../screens/Ps3DiagnosticsScreen';
 
 export type SettingsStackParams = {
 	[Screens.SettingsScreen]: undefined;
 	[Screens.DevSettingsScreen]: undefined;
+	[Screens.Ps3DiagnosticsScreen]: undefined;
 };
 
 const SettingsStack = createStackNavigator<SettingsStackParams>();
@@ -32,6 +34,11 @@ const SettingsNavigator = () => {
 				options={{
 					title: t('headings.settings')
 				}}
+			/>
+			<SettingsStack.Screen
+				name={Screens.Ps3DiagnosticsScreen}
+				component={Ps3DiagnosticsScreen}
+				options={{ title: 'PS3 playback evidence' }}
 			/>
 			<SettingsStack.Screen
 				name={Screens.DevSettingsScreen}

@@ -21,6 +21,8 @@ import DownloadModel from '../models/DownloadModel';
 import { getAppName, getDeviceProfile, getSafeDeviceName } from '../utils/Device';
 import StaticScriptLoader from '../utils/StaticScriptLoader';
 import { openBrowser } from '../utils/WebBrowser';
+import { classifyPlaybackRoute, fingerprintPlaybackRoute, recordPs3Diagnostic } from '../utils/PS3Diagnostics';
+import ps3WebHook from '../utils/PS3WebTrace';
 
 import RefreshWebView, { type RefreshWebViewProps } from './RefreshWebView';
 
@@ -48,11 +50,11 @@ window.ExpoAppInfo = {
 };
 
 window.ExpoAppSettings = {
-	isNativeVideoPlayerEnabled: ${settingStore.isNativeVideoPlayerEnabled},
+	isNativeVideoPlayerEnabled: ${settingStore.isNativeVideoPlayerEnabled || settingStore.isPs3DiagnosticEnabled},
 	isExperimentalNativeAudioPlayerEnabled: ${settingStore.isExperimentalNativeAudioPlayerEnabled}
 };
 
-window.ExpoVideoProfile = ${JSON.stringify(getDeviceProfile({ enableFmp4: settingStore.isFmp4Enabled }))};
+window.ExpoVideoProfile = ${JSON.stringify(getDeviceProfile({ enableFmp4: settingStore.isFmp4Enabled, ps3Diagnostic: settingStore.isPs3DiagnosticEnabled }))};
 
 function postExpoEvent(event, data) {
 	window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -60,6 +62,8 @@ function postExpoEvent(event, data) {
 		data: data
 	}));
 }
+
+${settingStore.isPs3DiagnosticEnabled ? ps3WebHook : ''}
 
 ${StaticScriptLoader.scripts.NativeAudioPlayer}
 ${StaticScriptLoader.scripts.NativeVideoPlayer}
@@ -94,6 +98,15 @@ true;
 		try {
 			const { event, data } = JSON.parse(state.data);
 			switch (event) {
+				case 'PS3Diagnostic.network':
+					if (settingStore.isPs3DiagnosticEnabled) {
+						recordPs3Diagnostic('network_response', {
+							route: data?.route, httpStatus: data?.httpStatus,
+							contentType: data?.contentType, elapsedMs: data?.elapsedMs,
+							status: data?.status
+						});
+					}
+					break;
 				case 'AppHost.exit':
 					BackHandler.exitApp();
 					break;
@@ -163,6 +176,12 @@ true;
 					break;
 				case 'ExpoAudioPlayer.play':
 				case 'ExpoVideoPlayer.play':
+					if (settingStore.isPs3DiagnosticEnabled && event === 'ExpoVideoPlayer.play') {
+						recordPs3Diagnostic('webview_play_request', {
+							route: classifyPlaybackRoute(data?.url),
+							routeHash: fingerprintPlaybackRoute(data?.url)
+						});
+					}
 					mediaStore.set({
 						type: event === 'ExpoAudioPlayer.play' ? MediaType.Audio : MediaType.Video,
 						uri: data.url,

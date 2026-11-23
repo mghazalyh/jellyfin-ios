@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from io import BytesIO
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 from .theater import (
     TheaterUI, BG, SIDEBAR, SURFACE, SURFACE2, WHITE, MUTED, ACCENT, BORDER,
     Image, ImageDraw, ImageTk, readable_runtime,
 )
+from .parity import QUALITY_ORDER
 
 HERO_BG = "#12131c"
 PANEL = "#1b1d28"
@@ -43,6 +44,15 @@ class CinematicUI(TheaterUI):
         self.episodes = []
         self.selected_source_id = ""
         self.source_buttons = []
+        self.quality_choice = tk.StringVar(value="auto")
+        self.no_video_copy = tk.BooleanVar(value=False)
+        self.surround_hd = tk.BooleanVar(value=False)
+        self.ac3_passthrough = tk.BooleanVar(value=False)
+        self.audio_stream_index = -1
+        self.subtitle_stream_index = -1
+        self.selected_audio_codec = ""
+        self.selected_audio_bitrate = 0
+        self.sources = []
         self.home_scroll_width = 1040
         super()._build()
         self._build_home()
@@ -250,8 +260,17 @@ class CinematicUI(TheaterUI):
         quality_row.pack(fill="x", padx=10, pady=(0, 11))
         self._label(quality_row, "PS3 playback profile", 11, MUTED, True).pack(
             side="left", padx=(0, 12))
-        for text, var in (("1080p H.264", self.lab.hd),
-                          ("AC-3 surround 5.1", self.lab.surround)):
+        self._label(quality_row, "Quality", 10, MUTED).pack(
+            side="left", padx=(4, 8))
+        self.quality_combo = ttk.Combobox(quality_row, textvariable=self.quality_choice,
+                                           values=list(QUALITY_ORDER), width=12,
+                                           state="readonly")
+        self.quality_combo.pack(side="left", padx=(0, 12))
+        for text, var in (("Auto 1080p", self.lab.hd),
+                          ("AC-3 5.1", self.lab.surround),
+                          ("Surround HD", self.surround_hd),
+                          ("AC-3 passthrough", self.ac3_passthrough),
+                          ("No video copy", self.no_video_copy)):
             tk.Checkbutton(
                 quality_row, text=text, variable=var, bg=BG, fg=WHITE,
                 activebackground=BG, activeforeground=WHITE,
@@ -263,6 +282,24 @@ class CinematicUI(TheaterUI):
             side="left")
         self.source_panel = tk.Frame(page, bg=BG)
         self.source_panel.pack(fill="x", padx=12, pady=(0, 6))
+        track_row = tk.Frame(page, bg=BG)
+        track_row.pack(fill="x", padx=12, pady=(0, 7))
+        self._label(track_row, "Audio", 10, MUTED, True).pack(side="left")
+        self.audio_choice = tk.StringVar(value="Default")
+        self.audio_options = [("Default", -1, "", 0)]
+        self.audio_combo = ttk.Combobox(track_row, textvariable=self.audio_choice,
+                                         values=["Default"], state="readonly", width=26)
+        self.audio_combo.pack(side="left", padx=(9, 25))
+        self.audio_combo.bind("<<ComboboxSelected>>",
+                              lambda _e: self._update_selected_tracks())
+        self._label(track_row, "Subtitles", 10, MUTED, True).pack(side="left")
+        self.subtitle_choice = tk.StringVar(value="Off")
+        self.subtitle_options = [("Off", -1)]
+        self.subtitle_combo = ttk.Combobox(track_row, textvariable=self.subtitle_choice,
+                                            values=["Off"], state="readonly", width=25)
+        self.subtitle_combo.pack(side="left", padx=9)
+        self.subtitle_combo.bind("<<ComboboxSelected>>",
+                                 lambda _e: self._update_selected_tracks())
         self.detail_content = tk.Frame(page, bg=BG)
         self.detail_content.pack(fill="both", expand=True, padx=12)
         self._label(self.detail_content, "Select a title to explore.",
@@ -466,6 +503,8 @@ class CinematicUI(TheaterUI):
         self.detail_item = item
         self.selected_item = item
         self.selected_source_id = ""
+        self.sources = []
+        self._reset_tracks()
         for child in self.source_panel.winfo_children():
             child.destroy()
         self.current_view = "detail"
@@ -515,8 +554,13 @@ class CinematicUI(TheaterUI):
         for child in self.source_panel.winfo_children():
             child.destroy()
         self.source_buttons.clear()
-        if not isinstance(sources, list) or len(sources) < 2:
+        if not isinstance(sources, list) or not sources:
             self.selected_source_id = ""
+            return
+        self.sources = [x for x in sources if isinstance(x, dict)]
+        if len(self.sources) < 2:
+            self.selected_source_id = str(self.sources[0].get("Id") or "")
+            self._update_tracks()
             return
         self._label(self.source_panel, "STREAM SOURCES", 10, MUTED, True).pack(
             side="left", padx=(0, 13))
@@ -543,6 +587,70 @@ class CinematicUI(TheaterUI):
         self.selected_source_id = str(source_id or "")
         for sid, button in self.source_buttons:
             button.configure(bg=ACCENT if sid == self.selected_source_id else SURFACE2)
+        self._update_tracks()
+
+    def _reset_tracks(self):
+        self.audio_options = [("Default", -1, "", 0)]
+        self.subtitle_options = [("Off", -1)]
+        self.audio_combo.configure(values=["Default"])
+        self.subtitle_combo.configure(values=["Off"])
+        self.audio_choice.set("Default")
+        self.subtitle_choice.set("Off")
+        self._update_selected_tracks()
+
+    def _update_tracks(self):
+        self._reset_tracks()
+        source = next((x for x in self.sources if
+                       str(x.get("Id") or "") == self.selected_source_id), None)
+        if not source:
+            return
+        media_streams = source.get("MediaStreams") or []
+        audio = []
+        subtitles = []
+        for stream in media_streams:
+            if not isinstance(stream, dict):
+                continue
+            try:
+                index = int(stream.get("Index", -1))
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if index < 0:
+                continue
+            kind = str(stream.get("Type") or "")
+            label = str(stream.get("DisplayTitle") or
+                        stream.get("Codec") or kind)[:56]
+            if kind == "Audio":
+                codec = str(stream.get("Codec") or "").lower()
+                try:
+                    bps = max(0, int(stream.get("BitRate") or 0))
+                except (TypeError, ValueError, OverflowError):
+                    bps = 0
+                audio.append((f"{index}: {label}", index, codec, bps,
+                              bool(stream.get("IsDefault"))))
+            elif kind == "Subtitle":
+                subtitles.append((f"{index}: {label}", index))
+        self.audio_options = [("Default", -1, "", 0)] + [
+            (label, idx, codec, bps) for label, idx, codec, bps, _ in audio
+        ]
+        self.subtitle_options = [("Off", -1)] + subtitles
+        self.audio_combo.configure(values=[x[0] for x in self.audio_options])
+        self.subtitle_combo.configure(values=[x[0] for x in self.subtitle_options])
+        default_audio = next((a[0] for a in audio if a[4]), "Default")
+        self.audio_choice.set(default_audio)
+        self.subtitle_choice.set("Off")
+        self._update_selected_tracks()
+
+    def _update_selected_tracks(self):
+        audio = next((a for a in self.audio_options if
+                      a[0] == self.audio_choice.get()),
+                     self.audio_options[0])
+        subtitle = next((s for s in self.subtitle_options if
+                         s[0] == self.subtitle_choice.get()),
+                        self.subtitle_options[0])
+        self.audio_stream_index = audio[1]
+        self.selected_audio_codec = audio[2]
+        self.selected_audio_bitrate = audio[3]
+        self.subtitle_stream_index = subtitle[1]
 
     def show_episodes(self, generation, series_id, data, error):
         if (self._closed or generation != self.detail_generation or

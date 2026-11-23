@@ -113,6 +113,7 @@ class NetworkShaper:
         self._rng = random.Random(profile.seed)
         self._lock = threading.Lock()
         self._next_delivery = 0.0
+        self._initialized = False
         self._bytes = 0
         self._retries = 0
         self._delay_ms = 0.0
@@ -128,12 +129,15 @@ class NetworkShaper:
             clock = time.monotonic() if now is None else now
             kbps = max(256, self.profile.effective_wifi_kbps)
             transmission = count * 8.0 / (kbps * 1000.0)
-            # Base RTT applies once per burst, not once per 188B TS packet.
-            initial = (self.profile.base_rtt_ms + self._rng.uniform(
-                -self.profile.jitter_ms, self.profile.jitter_ms)) / 1000.0
-            if self._next_delivery <= clock:
+            # One initial link RTT only. Applying a fresh 45ms on each
+            # 12KB transport read would turn 2.5 Mbps into ~1.1 Mbps
+            # and seriously misrepresent the intended stress profile.
+            if not self._initialized:
+                initial = (self.profile.base_rtt_ms + self._rng.uniform(
+                    -self.profile.jitter_ms, self.profile.jitter_ms)) / 1000.0
                 self._next_delivery = clock + max(0.0, initial)
-            self._next_delivery += transmission
+                self._initialized = True
+            self._next_delivery = max(clock, self._next_delivery) + transmission
             if self._rng.random() < self.profile.retry_pause_probability:
                 self._next_delivery += self.profile.retry_pause_ms / 1000.0
                 self._retries += 1

@@ -284,8 +284,7 @@ class PS3WireContract(unittest.TestCase):
             request = self.records("/Videos/")[-1]
             self.assert_identity([request])
             self.assertEqual(request["path"].split("?")[0],
-                             "/Videos/movie-source/version+1/stream.ts"
-                             if False else "/Videos/movie-source%2Fversion%2B1/stream.ts")
+                             "/Videos/movie-source%2Fversion%2B1/stream.ts")
             self.assertEqual(parse_qs(urlsplit(request["path"]).query)["DeviceId"],
                              [DEVICE])
             self.assertNotIn(TOKEN, relay.url)

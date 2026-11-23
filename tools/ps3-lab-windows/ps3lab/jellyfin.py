@@ -178,6 +178,8 @@ class JellyfinClient:
                     return {}
                 return json.loads(body.decode("utf-8"))
         except urllib.error.HTTPError as ex:
+            if ex.code == 401 and self.token:
+                self.token = ""
             # Never print response text: plugins can include tokens/paths.
             raise JellyfinError(f"Jellyfin HTTP {ex.code} for {method} {path.split('?')[0]}") from None
         except (urllib.error.URLError, ValueError, OSError) as ex:

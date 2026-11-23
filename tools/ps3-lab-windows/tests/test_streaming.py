@@ -74,7 +74,7 @@ class StreamingTests(unittest.TestCase):
     def test_mpv_embeds_in_window_not_a_fake_player(self):
         args = build_mpv_args(
             "mpv.exe", "http://127.0.0.1:4000/stream/random",
-            123456, r"\\.\pipe\private")
+            123456, r"\\.\pipe\private", platform="win32")
         self.assertIn("--wid=123456", args)
         self.assertIn("--force-window=immediate", args)
         self.assertIn("--input-ipc-server=" + r"\\.\pipe\private", args)

@@ -34,6 +34,12 @@ jobs:
       - name: Reference protocol and timing tests
         run: python -m unittest discover -s tests -v
         working-directory: tools/ps3-lab-windows
+      - name: Install FFmpeg on the hosted Linux runner
+        shell: bash
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y ffmpeg
+          command -v ffmpeg
       - name: Generate PS3-compatible H264 MP3 MPEG-TS fixture
         shell: bash
         run: |

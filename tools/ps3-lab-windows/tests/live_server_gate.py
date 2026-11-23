@@ -218,24 +218,25 @@ def run_stream_tests(client: JellyfinClient, item: dict,
     """Opt-in real authenticated stream; always attempt the stopped report."""
     session = None
     begun = False
+    position_ticks = 0
     media_type = str(item.get("Type") or "")[:30]
     result.selected_type = media_type
     try:
         session = client.make_session(
             item, hd=False, surround=False, quality="720p",
             budget_audio=True, no_video_copy=True)
+        position_ticks = 0 if session.live else max(0, int(session.start_ticks))
         client.playstate(session, "start", pos_ticks=0)
         begun = True
         read_transport(client, session, result)
         result.streaming_ok = True
-        client.playstate(
-            session, "progress",
-            pos_ticks=0 if session.live else max(0, int(session.start_ticks)),
-            paused=False)
+        client.playstate(session, "progress",
+                         pos_ticks=position_ticks, paused=False)
         result.lifecycle_ok = True
         if session.live:
             result.live_checked = True
-            result.seek_ok = True
+            # Live TV is explicitly nonseekable, not a successful seek.
+            result.seek_ok = False
             result.skipped.append("live-tv-is-not-seekable")
         elif test_seek:
             duration = int(item.get("RunTimeTicks") or 0)
@@ -248,6 +249,9 @@ def run_stream_tests(client: JellyfinClient, item: dict,
                 raise RuntimeError("Media source changed during seek")
             read_transport(client, seek_session, result,
                            target_packets=64, max_seconds=45)
+            position_ticks = max(0, int(seek_session.start_ticks))
+            client.playstate(seek_session, "progress",
+                             pos_ticks=position_ticks, paused=False)
             result.seek_ok = True
             result.completed.append("PlaySessionId/source continuity over seek")
         else:
@@ -261,8 +265,7 @@ def run_stream_tests(client: JellyfinClient, item: dict,
             try:
                 client.playstate(
                     session, "stopped",
-                    pos_ticks=0 if session.live else max(0, int(session.start_ticks)),
-                    paused=False)
+                    pos_ticks=position_ticks, paused=False)
                 result.completed.append("Stopped session reported to Jellyfin")
             except Exception as exc:
                 result.lifecycle_ok = False

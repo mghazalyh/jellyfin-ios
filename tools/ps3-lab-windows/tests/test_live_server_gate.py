@@ -135,6 +135,7 @@ class RealServerGateTests(unittest.TestCase):
         class FakeClient:
             def __init__(self):
                 self.events = []
+                self.positions = []
                 self.seeks = []
             def make_session(self, *_args, **_kwargs):
                 return SimpleNamespace(url="http://127.0.0.1/test", live=False,
@@ -142,6 +143,7 @@ class RealServerGateTests(unittest.TestCase):
                                        source_id="source")
             def playstate(self, _session, event, **_kwargs):
                 self.events.append(event)
+                self.positions.append(_kwargs.get("pos_ticks"))
             def seek_session(self, session, ticks, **_kwargs):
                 self.seeks.append(ticks)
                 return SimpleNamespace(url=session.url, live=False,
@@ -159,7 +161,8 @@ class RealServerGateTests(unittest.TestCase):
         self.assertTrue(checks.as_dict(True, True)["checks"]["seek_requested"])
         self.assertEqual(client.seeks, [100000000])
         self.assertEqual(read.call_count, 2)
-        self.assertEqual(client.events, ["start", "progress", "stopped"])
+        self.assertEqual(client.events, ["start", "progress", "progress", "stopped"])
+        self.assertEqual(client.positions, [0, 123, 100000000, 100000000])
 
     def test_stream_failure_still_reports_stopped_and_redacts_error(self):
         class FakeClient:
@@ -201,7 +204,9 @@ class RealServerGateTests(unittest.TestCase):
             gate.run_stream_tests(client, {"Type": "TvChannel"}, checks, True)
         self.assertTrue(checks.success(True, True))
         self.assertTrue(checks.live_checked)
-        self.assertTrue(checks.seek_ok)
+        self.assertFalse(checks.seek_ok)
+        self.assertFalse(checks.as_dict(True, True)["checks"]["session_seek"])
+        self.assertIn("live-tv-is-not-seekable", checks.skipped)
         self.assertEqual(read.call_count, 1)
         self.assertEqual(client.events, ["start", "progress", "stopped"])
 

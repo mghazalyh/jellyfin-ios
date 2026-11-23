@@ -34,9 +34,21 @@ jobs:
       - name: Reference protocol and timing tests
         run: python -m unittest discover -s tests -v
         working-directory: tools/ps3-lab-windows
+      - name: Generate PS3-compatible H264 MP3 MPEG-TS fixture
+        shell: bash
+        run: |
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=640x360:rate=30' -f lavfi -i 'sine=frequency=440:sample_rate=48000' -t 9 -c:v libx264 -preset ultrafast -profile:v baseline -level 3.1 -b:v 1800k -pix_fmt yuv420p -c:a libmp3lame -b:a 192k -ac 2 -f mpegts tools/ps3-lab-windows/tests/fixture.ts
+          test -s tools/ps3-lab-windows/tests/fixture.ts
+      - name: Upload synthetic TS fixture
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ps3-fixture-h264-ts
+          path: tools/ps3-lab-windows/tests/fixture.ts
+          retention-days: 3
 
   windows-build:
     name: Windows x64 EXE, parity tests and packaging
+    needs: linux-parity
     runs-on: windows-latest
     timeout-minutes: 35
     steps:
@@ -87,6 +99,16 @@ jobs:
           if ($null -eq $exe) { throw 'mpv.exe missing from archive' }
           Copy-Item -Path (Join-Path $exe.Directory.FullName '*') -Destination dist/mpv -Recurse -Force
           if (-not (Test-Path dist/mpv/mpv.exe)) { throw 'packaged mpv.exe missing' }
+      - name: Download synthetic TS fixture from Linux runner
+        uses: actions/download-artifact@v4
+        with:
+          name: ps3-fixture-h264-ts
+          path: tools/ps3-lab-windows/tests
+      - name: Verify actual mpv video decode inside Windows theater
+        shell: pwsh
+        run: |
+          python tools/ps3-lab-windows/tests/player_smoke.py tools/ps3-lab-windows/tests/fixture.ts dist/mpv/mpv.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows mpv video smoke failed' }
       - name: Package portable zip and checksum
         shell: pwsh
         run: |

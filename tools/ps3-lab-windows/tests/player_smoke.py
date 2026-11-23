@@ -58,7 +58,8 @@ def main():
     root.geometry("960x600+0+0")
     host = tk.Frame(root, bg="black", width=900, height=500)
     host.pack(fill="both", expand=True)
-    root.update()
+    if sys.platform != "darwin":
+        root.update()
 
     events = []
     controller = StreamController(lambda name, info: events.append((name, info)))
@@ -75,7 +76,10 @@ def main():
     logfile.close()
     loghandle = open(logfile.name, "wb")
     try:
-        args = build_mpv_args(str(mpv), proxy.url, int(host.winfo_id()), pipe)
+        # macOS mpv owns a Cocoa window; it never uses the Tk native ID.
+        # Avoid Tk.update() on macOS 15's legacy system Tk 8.5, which can hang.
+        window_id = 0 if sys.platform == "darwin" else int(host.winfo_id())
+        args = build_mpv_args(str(mpv), proxy.url, window_id, pipe)
         if sys.platform == "darwin":
             # The macOS process cannot embed its Cocoa window in Tk. Headless
             # testing verifies actual H.264 decode and IPC on a CI runner.
@@ -88,7 +92,8 @@ def main():
         max_position = 0.0
         video_params = None
         while time.monotonic() < deadline:
-            root.update()
+            if sys.platform != "darwin":
+                root.update()
             if proc.poll() is not None:
                 if max_position >= 1.0 and video_params:
                     break

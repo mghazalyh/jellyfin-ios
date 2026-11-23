@@ -70,13 +70,32 @@ class Fixture:
 
 
 def pump_until(root, predicate, timeout=10):
+    """Use Tk's own event loop instead of root.update() on old Cocoa/Tk 8.5.
+
+    The macOS system Python 3.9 Tk 8.5 on macOS 15 can permanently block in
+    Tk.update() even when root.mainloop() works. The release app uses mainloop,
+    so the smoke test must match that execution model.
+    """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        root.update()
-        if predicate():
-            return
-        time.sleep(0.05)
-    raise AssertionError("GUI operation did not complete within test deadline")
+    completed = {"ok": False}
+
+    def check():
+        try:
+            if predicate():
+                completed["ok"] = True
+                root.quit()
+            elif time.monotonic() >= deadline:
+                root.quit()
+            else:
+                root.after(50, check)
+        except Exception:
+            root.quit()
+            raise
+
+    root.after(0, check)
+    root.mainloop()
+    if not completed["ok"]:
+        raise AssertionError("GUI operation did not complete within test deadline")
 
 
 def main():
@@ -99,7 +118,8 @@ def main():
         print("GUI_STAGE=return_home", flush=True)
         lab.ui.navigate("home")
         pump_until(root, lambda: not lab.ui.home_pending)
-        root.update_idletasks()
+        if sys.platform != "darwin":
+            root.update_idletasks()
         print("GUI_STAGE=ready", flush=True)
         # Only capture the ephemeral GitHub-hosted Windows runner. macOS
         # screen capture can prompt for Screen Recording consent and can show

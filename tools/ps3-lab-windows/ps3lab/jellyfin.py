@@ -29,6 +29,8 @@ class PlaybackSession:
     live: bool
     title: str
     url: str
+    start_ticks: int = 0
+    duration_ticks: int = 0
 
 def ps3_device_profile(hd: bool = False, surround: bool = False) -> dict:
     """Match the default 720p stereo body_sd of api_detail.cpp.
@@ -340,13 +342,13 @@ class JellyfinClient:
             return b""
 
     def playback_info(self, item_id: str, hd=False, surround=False,
-                      source_id="", live=False) -> dict:
+                      source_id="", live=False, start_ticks=0) -> dict:
         if not self.user_id:
             raise JellyfinError("not authenticated")
         params = [
             ("UserId", self.user_id),
             ("MaxStreamingBitrate", 10000000 if hd else 8000000),
-            ("StartTimeTicks", "0"),
+            ("StartTimeTicks", str(max(0, int(start_ticks)))),
             ("AutoOpenLiveStream", "true" if live else "false"),
         ]
         if source_id:
@@ -356,25 +358,30 @@ class JellyfinClient:
         return self.request(url, "POST", {"DeviceProfile": ps3_device_profile(hd, surround)}, timeout=90)
 
     def make_session(self, item: dict, hd=False, surround=False,
-                     quality_bps=4000000) -> PlaybackSession:
+                     quality_bps=4000000, source_id="", start_ticks=0) -> PlaybackSession:
         item_id = item.get("Id") or ""
         if not item_id:
             raise JellyfinError("selected item has no Id")
         live = item.get("Type") == "TvChannel"
-        response = self.playback_info(item_id, hd=hd, surround=surround, live=live)
+        start_ticks = 0 if live else max(0, int(start_ticks or 0))
+        response = self.playback_info(item_id, hd=hd, surround=surround, live=live,
+                                      source_id=source_id, start_ticks=start_ticks)
         sources = response.get("MediaSources") or []
         if not sources:
             raise JellyfinError("PlaybackInfo returned no MediaSources")
-        selected = sources[0]
+        selected = next((x for x in sources if source_id and
+                         x.get("Id") == source_id), sources[0])
         sid = selected.get("Id") or item_id
         playid = response.get("PlaySessionId") or ""
         liveid = selected.get("LiveStreamId") or ""
         link = build_stream_url(
             self.base_url, item_id, sid, self.device_id, playid, liveid, live,
-            hd, surround, quality_bps=quality_bps)
+            hd, surround, start_ticks=start_ticks, quality_bps=quality_bps)
         return PlaybackSession(
             item_id=item_id, source_id=sid, play_session_id=playid,
-            live_stream_id=liveid, live=live, title=item.get("Name") or "Untitled", url=link)
+            live_stream_id=liveid, live=live, title=item.get("Name") or "Untitled",
+            url=link, start_ticks=start_ticks,
+            duration_ticks=max(0, int(item.get("RunTimeTicks") or 0)))
 
     def playstate(self, session: PlaybackSession, action: str,
                   pos_ticks=0, paused=False):

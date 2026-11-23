@@ -56,6 +56,8 @@ class Ps3Lab:
         self.items = []
         self.client = None
         self.session = None
+        self.current_item = None
+        self.prepare_generation = 0
         self.proxy = None
         self.player = None
         self.ipc_path = None
@@ -235,20 +237,59 @@ class Ps3Lab:
             raise JellyfinError("Sign in and select a movie, episode or channel")
         return item
 
+    @staticmethod
+    def item_resume_ticks(item):
+        if item.get("Type") == "TvChannel":
+            return 0
+        try:
+            position = max(0, int((item.get("UserData") or {}).get(
+                "PlaybackPositionTicks") or 0))
+            length = max(0, int(item.get("RunTimeTicks") or 0))
+            return position if length == 0 or position < length - 300000000 else 0
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     def begin(self, probe):
         try:
             item = self.selected()
         except JellyfinError as ex:
             messagebox.showwarning("PS3 Lab", str(ex))
             return
+        if item.get("Type") == "Series":
+            self.ui.show_details(item)
+            return
+        self.current_item = item
         if not probe:
             self.ui.show_player(item)
-        self.worker(self.prepare, item, probe, self.hd.get(), self.surround.get())
+        self.prepare_generation += 1
+        request_id = self.prepare_generation
+        hd, surround = self.hd.get(), self.surround.get()
+        start_ticks = 0 if probe else self.item_resume_ticks(item)
+        self.worker(self.prepare, item, probe, hd, surround, start_ticks, request_id)
 
-    def prepare(self, item, probe, hd, surround):
+    def prepare(self, item, probe, hd, surround, start_ticks=0, request_id=0):
         session = self.client.make_session(
-            item, hd=hd, surround=surround, quality_bps=8000000 if hd else 4000000)
-        return "prepared", (session, probe, hd)
+            item, hd=hd, surround=surround,
+            start_ticks=start_ticks, quality_bps=8000000 if hd else 4000000)
+        return "prepared", (request_id, session, probe, hd)
+
+    def seek_to_seconds(self, seconds):
+        if not self.session or self.session.live or not self.current_item:
+            self.status.set("Seeking is unavailable for this stream")
+            return
+        try:
+            requested = max(0, int(float(seconds) * 10000000))
+            if self.session.duration_ticks:
+                requested = min(requested, max(
+                    0, self.session.duration_ticks - 10000000))
+        except (ValueError, TypeError, OverflowError):
+            return
+        self.prepare_generation += 1
+        request_id = self.prepare_generation
+        item = self.current_item
+        self.status.set("Seeking through Jellyfin playback negotiation")
+        self.worker(self.prepare, item, False, self.hd.get(),
+                    self.surround.get(), requested, request_id)
 
     def begin_stream(self, session, probe, hd):
         self.stop()
@@ -260,8 +301,10 @@ class Ps3Lab:
         self.running = True
         self.last_progress_at = 0
         self.last_player_poll = 0
-        self.position_ticks = 0
+        self.position_ticks = session.start_ticks
         self.is_paused = False
+        self.ui.update_playback_position(self.position_ticks,
+                                         session.duration_ticks)
         self.emit("stream_opened", {"live": session.live, "hd": hd, "mode": self.profile.name})
         self.worker(self.send_playstate, session, "start")
         if probe:
@@ -295,11 +338,15 @@ class Ps3Lab:
         if not self.player or self.player.poll() is not None or not self.ipc_path:
             self.status.set("No active player")
             return
-        commands = {
-            "pause": ["cycle", "pause"],
-            "back": ["seek", -10, "relative"],
-            "forward": ["seek", 30, "relative"],
-        }
+        if action in ("back", "forward", "seek"):
+            if self.session.live:
+                self.status.set("Seeking is unavailable for live channels")
+                return
+            delta = -10 if action == "back" else (
+                30 if action == "forward" else validated_seek(value))
+            self.seek_to_seconds(self.position_ticks / 10000000 + delta)
+            return
+        commands = {"pause": ["cycle", "pause"]}
         if action == "volume":
             parts = ["set_property", "volume", validated_volume(value)]
         elif action == "seek":
@@ -335,15 +382,18 @@ class Ps3Lab:
         except (OSError, ValueError) as ex:
             return "probe_error", type(ex).__name__
 
-    def send_playstate(self, session, action):
+    def send_playstate(self, session, action, position=None, paused=None):
         try:
-            self.client.playstate(session, action, pos_ticks=self.position_ticks,
-                                  paused=self.is_paused)
+            self.client.playstate(session, action,
+                                  pos_ticks=self.position_ticks if position is None else position,
+                                  paused=self.is_paused if paused is None else paused)
             return "playstate", action
         except Exception as ex:
             return "playstate_error", type(ex).__name__
 
     def stop(self):
+        self.prepare_generation += 1
+        prior_position = self.position_ticks
         prior = self.session
         self.session = None
         self.running = False
@@ -367,7 +417,7 @@ class Ps3Lab:
                 self.emit("proxy_shutdown_error", {"type": type(ex).__name__})
             self.proxy = None
         if prior and self.client:
-            self.worker(self.send_playstate, prior, "stopped")
+            self.worker(self.send_playstate, prior, "stopped", prior_position, False)
         self.summary.set("No active stream")
 
     def apply_switches(self):
@@ -458,8 +508,9 @@ class Ps3Lab:
                         self.ui.show_items(self.ui.generation, {
                             "Items": result, "TotalRecordCount": len(result)})
                     elif key == "prepared":
-                        session, probe, hd = result
-                        self.begin_stream(session, probe, hd)
+                        request_id, session, probe, hd = result
+                        if request_id == self.prepare_generation:
+                            self.begin_stream(session, probe, hd)
                     elif key == "simulation":
                         self.emit("offline_simulation", result["simulation"])
                         self.status.set("Offline 20-second simulation complete")
@@ -474,7 +525,11 @@ class Ps3Lab:
                         self.emit("mpv_control", {"action": action})
                     elif key == "mpv_time":
                         try:
-                            self.position_ticks = max(0, int(float(result or 0) * 10000000))
+                            self.position_ticks = max(0, self.session.start_ticks +
+                                int(float(result or 0) * 10000000)) if self.session else 0
+                            if self.session:
+                                self.ui.update_playback_position(self.position_ticks,
+                                                                 self.session.duration_ticks)
                         except (ValueError, TypeError, OverflowError):
                             pass
                     elif key == "playstate_error":

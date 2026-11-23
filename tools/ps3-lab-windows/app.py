@@ -22,6 +22,7 @@ import urllib.request
 
 from ps3lab.jellyfin import JellyfinClient, JellyfinError
 from ps3lab.model import Profile, ps3_memory_budget, simulate_scenario
+from ps3lab.parity import video_mode
 from ps3lab.proxy import LocalProxy, StreamController
 from ps3lab.player import (build_mpv_args, ipc_command, new_ipc_path,
                            validated_seek, validated_volume)
@@ -266,24 +267,40 @@ class Ps3Lab:
             else "")
         if not probe:
             self.ui.show_player(item)
+        quality = self.ui.quality_choice.get()
+        requested_hd = video_mode(quality, hd=self.hd.get(),
+                                   live=item.get("Type") == "TvChannel").height > 720
+        passthrough = self.ui.ac3_passthrough.get()
+        surround = self.surround.get() or passthrough
+        audio_codec = self.ui.selected_audio_codec
+        hd_codec = ""
+        if surround and not passthrough and self.ui.surround_hd.get():
+            if audio_codec in ("dts", "dts-hd", "dts_hd"):
+                hd_codec = "dts"
+            elif audio_codec in ("truehd", "true-hd"):
+                hd_codec = "truehd"
         self.stream_settings = {
-            "hd": self.hd.get(), "surround": self.surround.get(),
-            "quality": "auto", "budget_audio": True,
+            "hd": requested_hd, "surround": surround,
+            "quality": quality, "budget_audio": True,
+            "no_video_copy": self.ui.no_video_copy.get(),
+            "hd_codec": hd_codec,
+            "ac3_copy": passthrough and audio_codec == "ac3",
+            "reported_audio_bps": self.ui.selected_audio_bitrate,
+            "audio_index": self.ui.audio_stream_index,
+            "subtitle_index": self.ui.subtitle_stream_index,
+            "subtitle_on_console": False,
         }
         self.prepare_generation += 1
         request_id = self.prepare_generation
-        hd, surround = self.hd.get(), self.surround.get()
         start_ticks = 0 if probe else self.item_resume_ticks(item)
-        self.worker(self.prepare, item, probe, hd, surround, start_ticks,
-                    request_id, self.current_source_id)
+        self.worker(self.prepare, item, probe, dict(self.stream_settings),
+                    start_ticks, request_id, self.current_source_id)
 
-    def prepare(self, item, probe, hd, surround, start_ticks=0, request_id=0,
+    def prepare(self, item, probe, settings, start_ticks=0, request_id=0,
                 source_id=""):
         session = self.client.make_session(
-            item, hd=hd, surround=surround,
-            start_ticks=start_ticks, source_id=source_id,
-            quality_bps=8000000 if hd else 4000000)
-        return "prepared", (request_id, session, probe, hd)
+            item, source_id=source_id, start_ticks=start_ticks, **settings)
+        return "prepared", (request_id, session, probe, settings["hd"])
 
     def seek_to_seconds(self, seconds):
         if not self.session or self.session.live or not self.current_item:

@@ -446,7 +446,7 @@ class Ps3Pipeline:
         self._vblanks = 0
         self._sync_waits = 0
         self._flip_late = 0
-        self._last_present_ms = 0.0
+        self._frame_phase_ms = 0.0
         self._max_frame_queue = 0
         self._last_snapshot = {}
 
@@ -484,13 +484,21 @@ class Ps3Pipeline:
                 self._rsx_pending.popleft()
             if self._rsx_pending:
                 self._sync_waits += 1
+            # Carry fractional frame duration across refreshes, as the console
+            # display gate carries unused vblank time into the next picture.
+            # Resetting to the last flip quantizes 24 fps to 20 at 59.94 Hz.
+            self._frame_phase_ms += period
             if self._frames < 1:
                 self._stalled_ms += period
+                # Retain at most one pending picture through starvation;
+                # do not invent an unbounded post-stall presentation burst.
+                self._frame_phase_ms = min(self._frame_phase_ms, frame_interval)
                 continue
             if self._rsx_pending and len(self._rsx_pending) >= max(1, self.profile.rsx_queue_depth):
                 self._flip_late += 1
+                self._frame_phase_ms = min(self._frame_phase_ms, frame_interval)
                 continue
-            if vblank_time - self._last_present_ms < frame_interval:
+            if self._frame_phase_ms + 1e-9 < frame_interval:
                 continue
             rsx_ms = self.profile.rsx_upload_ms + self.profile.rsx_flip_ms
             # Frames held due to GPU upload are counted as missed flips.
@@ -499,7 +507,7 @@ class Ps3Pipeline:
             self._rsx_pending.append(vblank_time + rsx_ms)
             self._frames -= 1
             self._displayed += 1
-            self._last_present_ms = vblank_time
+            self._frame_phase_ms = max(0.0, self._frame_phase_ms - frame_interval)
         result = {
             "simulated_elapsed_ms": round(self._at_ms),
             "simulated_received_bytes": self._input_bytes,

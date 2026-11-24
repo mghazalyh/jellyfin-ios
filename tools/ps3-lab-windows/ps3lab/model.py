@@ -40,6 +40,11 @@ RETRY_PAUSE_REFERENCE_BYTES = TS_PACKET_SIZE * 64
 WIFI_B_PHY_KBPS = 11000
 MAX_RETRY_DEBT_SECONDS = 30.0
 IDLE_DEBT_EXPIRY_SECONDS = 1.0
+# MPEG-TS PTS/PCR base clocks tick at 90 kHz and wrap at 2**33.
+TS_CLOCK_HZ = 90000
+TS_CLOCK_WRAP = 1 << 33
+# A PCR advance larger than this is treated as a gap/reset, not continuation.
+PCR_GAP_TICKS = 10 * TS_CLOCK_HZ
 
 @dataclass(frozen=True)
 class Profile:
@@ -314,9 +319,8 @@ class TsInspector:
         self.video_packets = 0
         self.audio_packets = 0
         self.discontinuities = 0
-        self.pcr_first = None
         self.pcr_last = None
-        self.pcr_duration_ms = 0
+        self.pcr_elapsed_ticks = 0
         self.pcr_pid = None
         self.pmt_pid = None
         self.video_pid = None
@@ -360,6 +364,22 @@ class TsInspector:
             del self.pending[:TS_PACKET_SIZE]
             self._packet(pkt)
 
+    def _observe_pcr(self, pcr: int, discontinuity: bool) -> None:
+        """Accumulate transport PCR span with 33-bit wrap handling.
+
+        Genuine wraps are modular and contiguous, so the missing top-of-range
+        interval is added rather than dropped. A flagged discontinuity or a
+        gap larger than PCR_GAP_TICKS is excluded instead of inventing elapsed
+        transport time.
+        """
+        delta = pcr - self.pcr_last
+        if discontinuity:
+            return
+        if delta < 0:
+            delta += TS_CLOCK_WRAP
+        if 0 <= delta <= PCR_GAP_TICKS:
+            self.pcr_elapsed_ticks += delta
+
     def _packet(self, p: bytes) -> None:
         self.packets += 1
         if p[1] & 0x80:
@@ -391,24 +411,10 @@ class TsInspector:
                     pcr = (p[6] << 25 | p[7] << 17 | p[8] << 9 |
                            p[9] << 1 | p[10] >> 7)
                     if self.pcr_pid is None:
-                        self.pcr_pid, self.pcr_first = pid, pcr
+                        self.pcr_pid = pid
                     if self.pcr_pid == pid:
-                        if self.pcr_last is not None and self.pcr_first is not None:
-                            step = pcr - self.pcr_last
-                            if discontinuity:
-                                self.pcr_duration_ms += max(0, (self.pcr_last - self.pcr_first) // 90)
-                                self.pcr_first = pcr
-                            else:
-                                # A 33-bit PCR base rolls over from near 2**33
-                                # to zero. Treat that large backward step as a
-                                # forward rollover, not as a discontinuity.
-                                if step <= -(1 << 32):
-                                    pcr += ((self.pcr_last - pcr + (1 << 32))
-                                            // (1 << 33)) * (1 << 33)
-                                    step = pcr - self.pcr_last
-                                if step < 0 or step > 900000:
-                                    self.pcr_duration_ms += max(0, (self.pcr_last - self.pcr_first) // 90)
-                                    self.pcr_first = pcr
+                        if self.pcr_last is not None:
+                            self._observe_pcr(pcr, discontinuity)
                         self.pcr_last = pcr
             off = 5 + length
         cc = p[3] & 15
@@ -460,9 +466,8 @@ class TsInspector:
                 self.audio_pts = self._pts(data)
 
     def snapshot(self) -> dict:
-        pcr_ms = self.pcr_duration_ms
-        if self.pcr_first is not None and self.pcr_last is not None:
-            pcr_ms += max(0, (self.pcr_last - self.pcr_first) // 90)
+        pcr_ms = (self.pcr_elapsed_ticks * 1000 // TS_CLOCK_HZ
+                  if self.pcr_last is not None else None)
         av_ms = av_sync_ms(self.video_pts, self.audio_pts)
         return {
             "ts_packets": self.packets, "transport_bytes": self.bytes,
@@ -477,7 +482,12 @@ class TsInspector:
             "video_packets": self.video_packets, "audio_packets": self.audio_packets,
             "video_pes_starts": self.pes_video_starts,
             "audio_pes_starts": self.pes_audio_starts,
-            "pcr_elapsed_ms": pcr_ms, "pts_video_minus_audio_ms": av_ms,
+            "pcr_pid": self.pcr_pid,
+            "pcr_elapsed_ms": pcr_ms,
+            "video_pts_ticks": self.video_pts,
+            "audio_pts_ticks": self.audio_pts,
+            "transport_clock_hz": TS_CLOCK_HZ,
+            "pts_video_minus_audio_ms": av_ms,
             "discontinuity_flags": self.discontinuities,
             "unparsed_tail_bytes": len(self.pending),
         }
@@ -521,7 +531,8 @@ class Ps3Pipeline:
         self._input_bytes += received_bytes
         ring_max = self.budget["assumed_ring_capacity_bytes"]
         offered = self._ring + received_bytes
-        self._overflow_bytes += max(0.0, offered - ring_max)
+        overflow = max(0.0, offered - ring_max)
+        self._overflow_bytes += overflow
         self._ring = min(ring_max, offered)
         # CPU stage: compressed bytes per decoded frame and limited frame slots.
         frame_interval = 1000.0 / max(1.0, self.profile.video_fps)
@@ -530,6 +541,10 @@ class Ps3Pipeline:
         self._present_credit_ms += elapsed_ms
         nominal_bytes_per_frame = max(1, self.profile.nominal_transport_bps / 8.0 /
                                       max(1.0, self.profile.video_fps))
+        # Compressed bytes rejected by the ring are frames the source produced
+        # but the modeled player could never decode. This is a model count, not
+        # a physical capture drop.
+        self._dropped += int(overflow // nominal_bytes_per_frame)
         cap = self.budget["decoded_slots"]
         while (self._decode_credit_ms >= effective_decode and
                self._ring >= nominal_bytes_per_frame and self._frames < cap):

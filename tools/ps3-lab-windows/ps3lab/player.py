@@ -6,12 +6,36 @@ is a random, opaque localhost relay address; remote credentials stay private.
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import socket
 import sys
 import time
 import uuid
+
+# Jellyfin report timestamps use 100 ns ticks; mpv time-pos is in seconds.
+JELLYFIN_TICKS_PER_SECOND = 10_000_000
+
+
+def mpv_seconds_to_ticks(seconds, base_ticks=0) -> int:
+    """Convert an mpv time-pos reading to Jellyfin ticks without inventing time.
+
+    Missing, non-finite or unparsable readings keep the base position rather
+    than fabricating playback progress. This is a player clock conversion and
+    is not a transport PTS or physical output measurement.
+    """
+    try:
+        base = max(0, int(base_ticks))
+    except (TypeError, ValueError, OverflowError):
+        base = 0
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return base
+    if not math.isfinite(value):
+        return base
+    return max(0, base + int(value * JELLYFIN_TICKS_PER_SECOND))
 
 
 def new_ipc_path() -> str:

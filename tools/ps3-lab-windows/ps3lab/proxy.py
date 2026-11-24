@@ -138,6 +138,13 @@ class StreamController:
                             simulated_nominal_transport_bps=self.profile.nominal_transport_bps,
                             simulated_transport_rate_includes_audio=bool(self.profile.stream_transport_bps),
                             simulated_live=self.pipeline.live)
+                # Keep measurement channels explicitly separate: PTS/PCR are
+                # transport observations, mpv time-pos is a player clock polled
+                # over IPC, and this simulator never measures physical output.
+                snap.update(transport_measurement_source="mpeg_ts_pts_pcr",
+                            mpv_clock_seconds=None,
+                            physical_output_frames=None,
+                            physical_output_measured=False)
                 snap.update(self._shaper.stats())
                 self._emit("sample", snap)
             return delay

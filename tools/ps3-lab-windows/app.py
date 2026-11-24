@@ -6,7 +6,6 @@ is the sole owner of UI controls. Credentials are never saved or exported.
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
@@ -20,12 +19,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import urllib.request
 
+from ps3lab.evidence import sanitize_evidence
 from ps3lab.jellyfin import JellyfinClient, JellyfinError
 from ps3lab.model import Profile, ps3_memory_budget, simulate_scenario
 from ps3lab.parity import video_mode
 from ps3lab.proxy import LocalProxy, StreamController
-from ps3lab.player import (build_mpv_args, ipc_command, new_ipc_path,
-                           validated_seek, validated_volume)
+from ps3lab.player import (build_mpv_args, ipc_command, mpv_seconds_to_ticks,
+                           new_ipc_path, validated_seek, validated_volume)
 from ps3lab.surf import (SURF_ACTIONS, SurfError, SurfResult, SurfSelection,
                          SurfSession, mode_for_item, parse_status,
                          token_valid, validate_catalog_url)
@@ -195,19 +195,8 @@ class Ps3Lab:
         )).pack(anchor="w", pady=10)
 
     def emit(self, name, data):
-        # Only known, non-sensitive fields enter the durable event journal.
-        fields = {}
-        for key, value in (data or {}).items():
-            if str(key).lower() in (
-                "token", "authorization", "password", "url", "path",
-                "item_id", "source_id", "title", "username", "headers"
-            ):
-                continue
-            if isinstance(value, (int, float, bool)) or value is None:
-                fields[key] = value
-            elif isinstance(value, str):
-                fields[key] = "[redacted]" if "://" in value or "token=" in value.lower() else value[:92]
-        record = {"utc": datetime.now(timezone.utc).isoformat(), "event": name, "data": fields}
+        # Only bounded, non-sensitive structured fields enter the event journal.
+        record = sanitize_evidence(name, data)
         self.dispatch("event", record)
 
     def dispatch(self, kind, value):
@@ -693,10 +682,12 @@ class Ps3Lab:
                     self._render_event(value)
                     if value["event"] == "sample":
                         data = value["data"]
+                        pcr = data.get("pcr_elapsed_ms")
+                        pcr_text = "n/a" if pcr is None else str(pcr)
                         self.summary.set(
                             f"TS={data.get('ts_packets',0)} "
                             f"CC errors={data.get('continuity_errors',0)} "
-                            f"PCR={data.get('pcr_elapsed_ms',0)}ms "
+                            f"PCR={pcr_text}ms "
                             f"simulated stalls={data.get('simulated_stalled_ms',0)}ms")
                 elif kind == "error":
                     self.status.set("Operation failed: " + value)
@@ -748,9 +739,9 @@ class Ps3Lab:
                         self.emit("mpv_control", {"action": action})
                     elif key == "mpv_time":
                         try:
-                            self.position_ticks = max(0, self.session.start_ticks +
-                                int(float(result or 0) * 10000000)) if self.session else 0
                             if self.session:
+                                self.position_ticks = mpv_seconds_to_ticks(
+                                    result, self.session.start_ticks)
                                 self.ui.update_playback_position(self.position_ticks,
                                                                  self.session.duration_ticks)
                         except (ValueError, TypeError, OverflowError):

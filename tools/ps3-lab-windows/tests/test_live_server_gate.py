@@ -185,6 +185,84 @@ class RealServerGateTests(unittest.TestCase):
         self.assertEqual(checks.failures[0]["phase"], "authenticated-stream")
         self.assertNotIn("UNSAFE_SECRET", json.dumps(checks.as_dict(True, True)))
 
+    def test_seek_continuity_mismatch_fails_and_stop_is_reported(self):
+        for mismatch in ("play_session_id", "source_id"):
+            with self.subTest(mismatch=mismatch):
+                class FakeClient:
+                    def __init__(self):
+                        self.events = []
+                    def make_session(self, *_args, **_kwargs):
+                        return SimpleNamespace(url="http://127.0.0.1/test", live=False,
+                                               start_ticks=0, play_session_id="session",
+                                               source_id="source")
+                    def playstate(self, _session, event, **_kwargs):
+                        self.events.append(event)
+                    def seek_session(self, session, ticks, **_kwargs):
+                        return SimpleNamespace(
+                            url=session.url, live=False, start_ticks=ticks,
+                            play_session_id=("changed" if mismatch == "play_session_id"
+                                             else session.play_session_id),
+                            source_id=("changed" if mismatch == "source_id"
+                                       else session.source_id))
+
+                client = FakeClient()
+                checks = gate.Checks(public_ok=True, authentication_ok=True,
+                                     library_ok=True, seek_requested=True)
+                with patch.object(gate, "read_transport"):
+                    gate.run_stream_tests(client, {"Type": "Movie"}, checks, True)
+                self.assertFalse(checks.success(True, True))
+                self.assertFalse(checks.seek_ok)
+                self.assertEqual(checks.failures[0]["phase"], "authenticated-stream")
+                self.assertEqual(checks.failures[0]["error_type"], "RuntimeError")
+                self.assertEqual(client.events, ["start", "progress", "stopped"])
+                self.assertIn("Stopped session reported to Jellyfin",
+                              checks.completed)
+
+    def test_stop_report_failure_is_not_lifecycle_success(self):
+        class FakeClient:
+            def __init__(self):
+                self.events = []
+            def make_session(self, *_args, **_kwargs):
+                return SimpleNamespace(url="http://127.0.0.1/test", live=False,
+                                       start_ticks=0, play_session_id="session",
+                                       source_id="source")
+            def playstate(self, _session, event, **_kwargs):
+                self.events.append(event)
+                if event == "stopped":
+                    raise RuntimeError("private:STOP_SECRET")
+
+        client = FakeClient()
+        checks = gate.Checks(public_ok=True, authentication_ok=True, library_ok=True)
+        with patch.object(gate, "read_transport"):
+            gate.run_stream_tests(client, {"Type": "Movie"}, checks, False)
+        self.assertFalse(checks.success(True, True))
+        self.assertTrue(checks.streaming_ok)
+        self.assertFalse(checks.lifecycle_ok)
+        self.assertEqual(client.events, ["start", "progress", "stopped"])
+        self.assertEqual(checks.failures[-1]["phase"], "playstate-stop")
+        self.assertEqual(checks.failures[-1]["error_type"], "RuntimeError")
+        self.assertNotIn("STOP_SECRET", json.dumps(checks.as_dict(True, True)))
+
+    def test_playbackinfo_failure_does_not_start_or_stop_a_session(self):
+        class FakeClient:
+            def __init__(self):
+                self.events = []
+            def make_session(self, *_args, **_kwargs):
+                raise RuntimeError("private:PLAYBACKINFO_SECRET")
+            def playstate(self, _session, event, **_kwargs):
+                self.events.append(event)
+
+        client = FakeClient()
+        checks = gate.Checks(public_ok=True, authentication_ok=True, library_ok=True)
+        gate.run_stream_tests(client, {"Type": "Movie"}, checks, False)
+        self.assertFalse(checks.success(True, True))
+        self.assertFalse(checks.streaming_ok)
+        self.assertFalse(checks.lifecycle_ok)
+        self.assertEqual(client.events, [])
+        self.assertEqual(checks.failures[0]["phase"], "authenticated-stream")
+        self.assertNotIn("PLAYBACKINFO_SECRET",
+                         json.dumps(checks.as_dict(True, True)))
+
     def test_live_tv_never_seeks_and_reports_stop(self):
         class FakeClient:
             def __init__(self):

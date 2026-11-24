@@ -33,6 +33,7 @@ class ServerState:
         self.fail_request = ""
         self.token = TOKEN
         self.mode = "normal"
+        self.playback_info_mode = "normal"
 
     def record(self, method, path, headers, payload):
         with self.lock:
@@ -113,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
                 "AccessToken": TOKEN, "User": {"Id": "user-1", "Name": "Fixture"}
             })
         if path.endswith("/PlaybackInfo"):
+            if self.server.state.playback_info_mode == "no_sources":
+                return self.respond({"PlaySessionId": SESSION, "MediaSources": []})
             data = {
                 "PlaySessionId": SESSION,
                 "MediaSources": [
@@ -180,6 +183,7 @@ class PS3WireContract(unittest.TestCase):
         with self.server.state.lock:
             self.server.state.records.clear()
         self.server.state.fail_request = ""
+        self.server.state.playback_info_mode = "normal"
         self.client = JellyfinClient(self.url, device_id=DEVICE)
         self.client.authenticate("fixture", "password")
         self.assertEqual(self.client.token, TOKEN)
@@ -263,6 +267,85 @@ class PS3WireContract(unittest.TestCase):
         self.assertEqual([r["payload"]["PositionTicks"] for r in history],
                          [0, 0, 0])
         self.assertTrue(all(not r["payload"]["CanSeek"] for r in history))
+
+    def test_identity_mismatch_is_rejected_with_bounded_error(self):
+        other = JellyfinClient(self.url, device_id="ps3-lab-wrong-device")
+        with self.assertRaises(JellyfinError) as context:
+            other.authenticate("fixture", "password")
+        self.assertIn("HTTP 403", str(context.exception))
+        self.assertNotIn(TOKEN, str(context.exception))
+        self.assertEqual(other.token, "")
+        login = self.records("/Users/AuthenticateByName")[-1]
+        self.assertIn('Client="PS3"', login["auth"])
+        self.assertIn('Device="PS3"', login["auth"])
+        self.assertIn('DeviceId="ps3-lab-wrong-device"', login["auth"])
+        self.assertEqual(login["user_agent"], "JellyfinPS3/0.1")
+        self.assertNotIn("Token=", login["auth"])
+
+    def test_playbackinfo_without_media_sources_is_rejected(self):
+        self.server.state.playback_info_mode = "no_sources"
+        with self.assertRaises(JellyfinError) as context:
+            self.client.make_session({"Id": "movie-1", "Type": "Movie"})
+        self.assertEqual(str(context.exception),
+                         "PlaybackInfo returned no MediaSources")
+        self.assertNotIn(TOKEN, str(context.exception))
+        self.assertEqual(len(self.records("/Sessions/Playing")), 0)
+        request = self.records("/Items/")[-1]
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(request["payload"]["DeviceProfile"]["Name"], "PS3")
+
+    def test_playbackinfo_http_failure_is_bounded(self):
+        self.server.state.fail_request = "/Items/movie-1/PlaybackInfo"
+        with self.assertRaises(JellyfinError) as context:
+            self.client.make_session({"Id": "movie-1", "Type": "Movie"})
+        self.assertIn("HTTP 503", str(context.exception))
+        self.assertNotIn(TOKEN, str(context.exception))
+        self.assertEqual(self.client.token, TOKEN)
+
+    def test_seek_reuses_session_source_and_skips_new_playbackinfo(self):
+        item = {"Id": "movie-1", "Type": "Movie", "RunTimeTicks": 36000000000}
+        session = self.client.make_session(
+            item, start_ticks=5000000000, source_id=VIDEO, quality="720p")
+        before = len(self.server.state.snapshot())
+        seek = self.client.seek_session(session, 999999999999, quality="720p")
+        self.assertEqual(len(self.server.state.snapshot()), before)
+        self.assertEqual(seek.play_session_id, SESSION)
+        self.assertEqual(seek.source_id, VIDEO)
+        self.assertEqual(seek.live_stream_id, "")
+        self.assertEqual(seek.item_id, "movie-1")
+        self.assertEqual(seek.start_ticks, 35990000000)
+        query = parse_qs(urlsplit(seek.url).query)
+        self.assertEqual(urlsplit(seek.url).path,
+                         "/Videos/movie-source%2Fversion%2B1/stream.ts")
+        self.assertEqual(query["PlaySessionId"], [SESSION])
+        self.assertEqual(query["MediaSourceId"], [VIDEO])
+        self.assertEqual(query["DeviceId"], [DEVICE])
+        self.assertEqual(query["StartTimeTicks"], ["35990000000"])
+        self.assertNotIn("LiveStreamId", query)
+
+    def test_live_and_negative_seek_fail_without_server_requests(self):
+        live = self.client.make_session({"Id": CHANNEL, "Type": "TvChannel"})
+        vod = self.client.make_session({"Id": "movie-1", "Type": "Movie"})
+        before = len(self.server.state.snapshot())
+        with self.assertRaises(JellyfinError):
+            self.client.seek_session(live, 10000000)
+        with self.assertRaises(ValueError):
+            self.client.seek_session(vod, -1)
+        self.assertEqual(len(self.server.state.snapshot()), before)
+
+    def test_stop_reporting_failure_is_bounded_and_keeps_token(self):
+        session = self.client.make_session({"Id": "movie-1", "Type": "Movie"})
+        self.client.playstate(session, "start")
+        self.server.state.fail_request = "/Sessions/Playing/Stopped"
+        with self.assertRaises(JellyfinError) as context:
+            self.client.playstate(session, "stopped", pos_ticks=5000000000)
+        self.assertIn("HTTP 503", str(context.exception))
+        self.assertNotIn(TOKEN, str(context.exception))
+        self.assertEqual(self.client.token, TOKEN)
+        stopped = self.records("/Sessions/Playing/Stopped")[-1]
+        self.assertEqual(stopped["payload"]["PlaySessionId"], SESSION)
+        self.assertEqual(stopped["payload"]["PositionTicks"], 5000000000)
+        self.assertNotIn("LiveStreamId", stopped["payload"])
 
     def test_real_loopback_transport_forwards_exact_ps3_headers(self):
         session = self.client.make_session({"Id": "movie-1", "Type": "Movie"})

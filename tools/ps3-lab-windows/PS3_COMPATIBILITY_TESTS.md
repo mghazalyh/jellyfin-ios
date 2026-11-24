@@ -75,3 +75,11 @@ display debt during starvation. The earlier model rounded 24 fps down to
 about 20 fps. All prior simulated timing numbers are provisional until
 recomputed using the corrected cadence and memory model. These are still
 modeled results, not physical console performance measurements.
+
+The expanded matrix covers all seven selectable presets in both VOD and
+Live TV under four modeled stress settings (56 cases). Each scenario checks
+ring and frame queue bounds, mode-specific reservations, cadence and
+monotonic network stress effects. Stalled time now counts refreshes with
+a missed picture deadline, rather than harmless empty decode-ahead intervals
+while a picture is held. The stress inputs are synthetic and are not measured
+Cell, RSX or actual Wi-Fi performance.

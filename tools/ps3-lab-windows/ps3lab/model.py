@@ -488,6 +488,11 @@ class Ps3Pipeline:
             # display gate carries unused vblank time into the next picture.
             # Resetting to the last flip quantizes 24 fps to 20 at 59.94 Hz.
             self._frame_phase_ms += period
+            # An empty decode-ahead queue is not itself a stall: the currently
+            # displayed picture may still have time remaining. Only count
+            # missing pictures/queue saturation once a new flip is due.
+            if self._frame_phase_ms + 1e-9 < frame_interval:
+                continue
             if self._frames < 1:
                 self._stalled_ms += period
                 # Retain at most one pending picture through starvation;
@@ -497,8 +502,6 @@ class Ps3Pipeline:
             if self._rsx_pending and len(self._rsx_pending) >= max(1, self.profile.rsx_queue_depth):
                 self._flip_late += 1
                 self._frame_phase_ms = min(self._frame_phase_ms, frame_interval)
-                continue
-            if self._frame_phase_ms + 1e-9 < frame_interval:
                 continue
             rsx_ms = self.profile.rsx_upload_ms + self.profile.rsx_flip_ms
             # Frames held due to GPU upload are counted as missed flips.

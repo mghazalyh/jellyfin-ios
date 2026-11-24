@@ -31,6 +31,22 @@ class DisplayCadenceTests(unittest.TestCase):
         self.assertEqual(set(gaps),{2,3})
         self.assertAlmostEqual(len(flips),120*23.976/59.94,delta=1)
 
+    def test_empty_queue_during_normal_picture_hold_is_not_stall(self):
+        p=replace(Profile.from_switches(False,False),video_fps=24,vblank_hz=60,
+                  stream_video_bps=192000)
+        engine=Ps3Pipeline(p,640,360,live=False)
+        # Exactly one nominal decoded picture, no further arrivals.
+        engine.step(1000/60,1000)
+        engine.step(1000/60)
+        first=engine.step(1000/60)
+        self.assertEqual(first["simulated_presented_frames"],1)
+        held=engine.step(1000/60)
+        self.assertEqual(held["simulated_stalled_ms"],0)
+        self.assertEqual(held["simulated_presented_frames"],1)
+        missed=engine.step(1000/60)
+        self.assertGreater(missed["simulated_stalled_ms"],0)
+        self.assertEqual(missed["simulated_presented_frames"],1)
+
     def test_starvation_cannot_accumulate_unbounded_catchup_debt(self):
         p=replace(Profile.from_switches(False,False),video_fps=24,vblank_hz=60)
         engine=Ps3Pipeline(p,1280,720,live=False)

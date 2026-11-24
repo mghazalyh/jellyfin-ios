@@ -160,6 +160,22 @@ class Ps3ForkParityTests(unittest.TestCase):
         self.assertEqual(wifi.stats()["simulated_wifi_bytes"], 24064)
         self.assertEqual(NetworkShaper(Profile.from_switches(False, False)).delay_for(12032), 0)
 
+    def test_declared_effective_wifi_goodput_survives_retry_pauses(self):
+        # A retry must delay one chunk and then repay the pause as a catch-up
+        # burst. Otherwise the shaper silently delivers far less than the
+        # stated effective throughput (measured: 2047/702 kbps before fix).
+        for severe, expected in ((False, 2500), (True, 1400)):
+            shaper = NetworkShaper(Profile.from_switches(False, True, severe))
+            now = 0.0
+            sent = 0
+            while now < 120.0:
+                now += shaper.delay_for(12032, now=now)
+                sent += 12032
+            goodput = sent * 8.0 / now / 1000.0
+            self.assertAlmostEqual(goodput, expected, delta=expected * 0.05)
+            self.assertGreater(
+                shaper.stats()["simulated_wifi_retransmission_pauses"], 0)
+
     def test_ts_inspector_cc_and_split_chunks(self):
         tracker = TsInspector()
         data = pkt(0x101, 0) + pkt(0x101, 1) + pkt(0x101, 5) + pkt(0x1fff, 0)

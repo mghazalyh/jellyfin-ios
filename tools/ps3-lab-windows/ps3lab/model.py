@@ -193,6 +193,7 @@ class NetworkShaper:
         self._retries = 0
         self._delay_ms = 0.0
         self._last_period = -1
+        self._retry_debt = 0.0
 
     def delay_for(self, count: int, now: float | None = None) -> float:
         """Return seconds to sleep; deterministic for fixed input timestamps."""
@@ -213,15 +214,28 @@ class NetworkShaper:
                 self._next_delivery = clock + max(0.0, initial)
                 self._initialized = True
             self._next_delivery = max(clock, self._next_delivery) + transmission
+            # Repay retry debt from previous stalls first so the declared
+            # effective_wifi_kbps remains delivered payload goodput. A real
+            # TCP retransmission produces a pause followed by a catch-up
+            # burst; it does not silently halve the link's stated capacity.
+            repay = min(self._retry_debt, max(0.0, self._next_delivery - clock))
+            self._next_delivery -= repay
+            self._retry_debt -= repay
+            extra = 0.0
             if self._rng.random() < self.profile.retry_pause_probability:
-                self._next_delivery += self.profile.retry_pause_ms / 1000.0
+                extra += self.profile.retry_pause_ms / 1000.0
                 self._retries += 1
             if self.profile.periodic_stall_seconds:
                 period = int(clock // self.profile.periodic_stall_seconds)
                 if period != self._last_period:
                     if self._last_period >= 0:
-                        self._next_delivery += self.profile.retry_pause_ms / 1000.0
+                        extra += self.profile.retry_pause_ms / 1000.0
                     self._last_period = period
+            if extra:
+                # Delay this chunk, and record the pause so later chunks are
+                # scheduled earlier (bounded) and repay the debt as a burst.
+                self._next_delivery += extra
+                self._retry_debt = min(30.0, self._retry_debt + extra)
             delay = max(0.0, self._next_delivery - clock)
             self._bytes += count
             self._delay_ms += delay * 1000.0

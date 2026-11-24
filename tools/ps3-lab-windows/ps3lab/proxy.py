@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import os
 import secrets
+import socket
 import threading
 import time
 from .model import NetworkShaper, Profile, Ps3Pipeline, TsInspector
@@ -53,6 +54,7 @@ class StreamController:
     def __init__(self, emit):
         self._lock = threading.RLock()
         self._emit = emit
+        self._generation = 0
         self.profile = Profile.from_switches(False, False)
         self.hd = False
         self.requested_width = 1920
@@ -72,6 +74,7 @@ class StreamController:
 
     def configure(self, url: str, headers: dict, profile: Profile, hd=False, *, live=True):
         with self._lock:
+            self._generation += 1
             self.stream_url = url
             self.headers = dict(headers)
             width, height, workload = requested_stream_workload(url, profile, hd)
@@ -102,10 +105,31 @@ class StreamController:
             self._frame_pacing_tail = 0.0
             self._emit("config_changed", {"mode": profile.name})
 
-    def stop(self):
-        self.closed.set()
+    @property
+    def generation(self):
         with self._lock:
+            return self._generation
+
+    def owns(self, generation):
+        with self._lock:
+            return (generation == self._generation and
+                    not self.closed.is_set())
+
+    def stop(self, generation=None):
+        """Cancel the configured stream only if it still owns this generation.
+
+        A stale LocalProxy must not stop a newer session that reused the same
+        controller after a reconfigure.
+        """
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                return False
+            self._generation += 1
             self._configured = False
+            self.stream_url = ""
+            self.headers = {}
+            self.closed.set()
+            return True
 
     def ingest(self, data: bytes):
         with self._lock:
@@ -152,7 +176,16 @@ class StreamController:
 class LocalProxy:
     def __init__(self, controller: StreamController):
         self.controller = controller
+        self.generation = controller.generation
         self.secret_path = "/stream/" + secrets.token_urlsafe(20)
+        self._lifecycle = threading.Lock()
+        self._active_lock = threading.Lock()
+        self._active = set()
+        self._connections = 0
+        self._connections_done = threading.Event()
+        self._connections_done.set()
+        self._started = False
+        self._closed = False
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -166,14 +199,24 @@ class LocalProxy:
                     self.send_error(404)
                     return
                 with owner.controller._lock:
+                    generation = owner.controller._generation
                     upstream_url = owner.controller.stream_url
                     headers = dict(owner.controller.headers)
-                if not upstream_url or owner.controller.closed.is_set():
+                if not upstream_url or not owner._owns(generation):
                     self.send_error(503)
                     return
+                origin = None
+                owner._connection_started()
                 try:
                     req = Request(upstream_url, headers=headers)
-                    with urlopen(req, timeout=45) as origin:
+                    origin = urlopen(req, timeout=45)
+                    if not owner._owns(generation):
+                        return
+                    if not owner._register(origin, generation):
+                        return
+                    try:
+                        if not owner._owns(generation):
+                            return
                         self.send_response(origin.status)
                         self.send_header("Content-Type", "video/mp2t")
                         self.send_header("Cache-Control", "no-store")
@@ -184,26 +227,49 @@ class LocalProxy:
                             "content_type": origin.headers.get("Content-Type", "")[:64]
                         })
                         # Align chunks with 188-byte MPEG-TS packet boundaries.
-                        while not owner.controller.closed.is_set():
+                        while owner._owns(generation):
                             data = origin.read(188 * 64)
-                            if not data:
+                            if not data or not owner._owns(generation):
                                 break
                             if owner.controller.suspended.is_set():
-                                while owner.controller.suspended.is_set() and not owner.controller.closed.wait(.05):
-                                    pass
+                                while (owner.controller.suspended.is_set() and
+                                       not owner.controller.closed.wait(.05)):
+                                    if not owner._owns(generation):
+                                        break
+                            if not owner._owns(generation):
+                                break
                             wait = owner.controller.ingest(data)
+                            if not owner._owns(generation):
+                                break
                             if wait and owner.controller.closed.wait(wait):
                                 break
                             self.wfile.write(data)
                         self.wfile.flush()
-                except (HTTPError, URLError, OSError, BrokenPipeError, ConnectionError) as ex:
-                    owner.controller._emit("stream_error", {
-                        "error": type(ex).__name__, "http": getattr(ex, "code", 0)
-                    })
+                    finally:
+                        owner._unregister(origin)
+                except (HTTPError, URLError, OSError, BrokenPipeError,
+                        ConnectionError, ValueError) as ex:
+                    # Cancellation of a superseded generation is not an error.
+                    if owner._owns(generation):
+                        owner.controller._emit("stream_error", {
+                            "error": type(ex).__name__, "http": getattr(ex, "code", 0)
+                        })
+                finally:
+                    if origin is not None:
+                        try:
+                            origin.close()
+                        except (OSError, ValueError):
+                            pass
+                    owner._connection_finished()
 
             def do_HEAD(self):
                 if self.path != owner.secret_path:
                     self.send_error(404)
+                    return
+                with owner.controller._lock:
+                    generation = owner.controller._generation
+                if not owner._owns(generation):
+                    self.send_error(503)
                     return
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp2t")
@@ -213,15 +279,74 @@ class LocalProxy:
         self.server.daemon_threads = True
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
+    def _owns(self, generation):
+        return self.controller.owns(generation)
+
+    def _register(self, origin, generation):
+        with self._active_lock:
+            if not self._owns(generation):
+                return False
+            self._active.add(origin)
+            return True
+
+    def _unregister(self, origin):
+        with self._active_lock:
+            self._active.discard(origin)
+
+    def _connection_started(self):
+        with self._active_lock:
+            self._connections += 1
+            self._connections_done.clear()
+
+    def _connection_finished(self):
+        with self._active_lock:
+            self._connections = max(0, self._connections - 1)
+            if not self._connections:
+                self._connections_done.set()
+
+    @property
+    def active_connections(self):
+        with self._active_lock:
+            return self._connections
+
+    def _cancel_active(self):
+        with self._active_lock:
+            active = list(self._active)
+            self._active.clear()
+        for origin in active:
+            sock = getattr(getattr(getattr(origin, "fp", None), "raw", None),
+                           "_sock", None)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
     @property
     def url(self):
         return f"http://127.0.0.1:{self.server.server_port}{self.secret_path}"
 
     def start(self):
+        with self._lifecycle:
+            if self._started or self._closed:
+                return
+            self._started = True
         self._thread.start()
 
     def close(self):
-        self.controller.stop()
-        self.server.shutdown()
+        with self._lifecycle:
+            if self._closed:
+                return
+            self._closed = True
+        self.controller.stop(self.generation)
+        self._cancel_active()
+        if self._started:
+            self.server.shutdown()
         self.server.server_close()
-        self._thread.join(timeout=3)
+        if self._started:
+            self._thread.join(timeout=3)
+        self._connections_done.wait(timeout=3)

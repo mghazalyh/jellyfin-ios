@@ -26,6 +26,9 @@ from ps3lab.parity import video_mode
 from ps3lab.proxy import LocalProxy, StreamController
 from ps3lab.player import (build_mpv_args, ipc_command, new_ipc_path,
                            validated_seek, validated_volume)
+from ps3lab.surf import (SURF_ACTIONS, SurfError, SurfResult, SurfSelection,
+                         SurfSession, mode_for_item, parse_status,
+                         token_valid, validate_catalog_url)
 from ps3lab.cinema import CinematicUI
 
 MAX_EVENTS = 6000
@@ -75,6 +78,10 @@ class Ps3Lab:
         self.last_surf_at = 0.0
         self.surf_signature = None
         self.surf_epoch = 0
+        self.surf = SurfSession()
+        self.surf_busy = False
+        self._surf_request_id = 0
+        self._surf_active_request = 0
         self._layout()
         self.apply_switches()
         root.after(200, self.pump)
@@ -252,6 +259,163 @@ class Ps3Lab:
         except (TypeError, ValueError, OverflowError):
             return 0
 
+    def surf_mode(self):
+        return mode_for_item(self.current_item)
+
+    def _surf_attach_session(self):
+        """Reset Surf state only when playback identity changes."""
+        self.surf_busy = False
+        self._surf_active_request = 0
+        mode = self.surf_mode()
+        if mode:
+            self.surf.begin(mode)
+            self.ui.show_surf(mode)
+        else:
+            self.surf.reset()
+            self.ui.hide_surf()
+
+    def _surf_feedback(self, text, ok=False):
+        self.status.set(text)
+        self.ui.set_surf_feedback(text, ok)
+
+    def surf_control(self, action):
+        """Actual desktop entry point for the native Surf Options commands."""
+        if action not in SURF_ACTIONS:
+            self._surf_feedback("Unknown Surf action", False)
+            return
+        mode = self.surf_mode()
+        if not mode:
+            self._surf_feedback(
+                "Surf controls are available only for Surf channels", False)
+            return
+        if not self.running or self.session is None:
+            self._surf_feedback(
+                "Surf controls require an active Surf playback", False)
+            return
+        if self.surf.mode != mode:
+            self.surf.begin(mode)
+            self.ui.show_surf(mode)
+        if self.surf_busy:
+            self._surf_feedback("A Surf request is already in progress", False)
+            return
+        if action == "current":
+            self.surf.select_current()
+            self.ui.set_surf_selection(None)
+            self._surf_feedback(
+                "Selection returned to Current; playback unchanged", True)
+            return
+        selection = None
+        if action == "favorite_previous":
+            chosen = self.surf.selection
+            if chosen is None or not token_valid(chosen.token):
+                self._surf_feedback("Select Previous Channel first", False)
+                return
+            # Snapshot the immutable token now; later rotation cannot change it.
+            selection = SurfSelection(chosen.source, chosen.token)
+        try:
+            catalog = validate_catalog_url(self.catalog.get())
+            if not self.client or not getattr(self.client, "token", ""):
+                raise SurfError("Jellyfin authentication unavailable")
+        except SurfError as ex:
+            self._surf_feedback(str(ex), False)
+            return
+        self._surf_request_id += 1
+        request_id = self._surf_request_id
+        self._surf_active_request = request_id
+        self.surf_busy = True
+        generation = self.surf.generation
+        trace = "mac_%08x_%08x" % (
+            int(time.monotonic()) & 0xffffffff, request_id & 0xffffffff)
+        self.ui.set_surf_feedback("Sending Surf request...", True)
+        self.status.set("Sending Surf " + action.replace("_", " ") + "...")
+        self.worker(self._surf_request, request_id, generation, mode, action,
+                    selection, catalog, trace)
+
+    def _surf_request(self, request_id, generation, mode, action, selection,
+                      catalog, trace):
+        def finish(ok, message, http_status=0, status=None, chosen=None):
+            return "surf_result", SurfResult(
+                action=action, mode=mode, generation=generation,
+                request_id=request_id, ok=ok, message=message,
+                http_status=http_status, status=status, selection=chosen)
+
+        try:
+            if action in ("status", "previous", "favorite"):
+                code, payload = self.client.surf_request(catalog, mode)
+                if code != 200:
+                    return finish(False, "Surf status unavailable (HTTP %d)" % code,
+                                  code)
+                current = parse_status(payload)
+                if action == "status":
+                    if not current.source:
+                        return finish(False, "No current playable source",
+                                      code, current)
+                    return finish(True, "Surf sending: " + current.source,
+                                  code, current)
+                if action == "previous":
+                    chosen = self.surf.choose_previous(generation, mode, current)
+                    if chosen is None:
+                        return finish(False, "No previous playable channel",
+                                      code, current)
+                    return finish(
+                        True,
+                        "Previous: %s (selection only; playback unchanged)" %
+                        chosen.source, code, current, chosen)
+                if not current.source:
+                    return finish(False, "No current playable source",
+                                  code, current)
+                code, _ = self.client.surf_request(
+                    catalog, mode, "favorite",
+                    {"source": current.source, "trace": trace})
+                if 200 <= code < 300:
+                    return finish(True, "Current server source favorited",
+                                  code, current)
+                return finish(False, "Surf favorite failed (HTTP %d)" % code,
+                              code, current)
+            if action in ("pause", "resume"):
+                code, _ = self.client.surf_request(catalog, mode, action, {})
+                ok = 200 <= code < 300
+                if ok:
+                    message = ("Looping paused; playback continues"
+                               if action == "pause"
+                               else "Automatic looping resumed")
+                else:
+                    message = "Surf %s failed (HTTP %d)" % (action, code)
+                return finish(ok, message, code)
+            if action == "favorite_previous":
+                if selection is None or not token_valid(selection.token):
+                    return finish(False, "Select Previous Channel first")
+                code, _ = self.client.surf_request(
+                    catalog, mode, "favorite",
+                    {"source": selection.source, "previous": True,
+                     "previous_token": selection.token, "trace": trace})
+                if 200 <= code < 300:
+                    return finish(True, "Selected Previous channel favorited",
+                                  code, chosen=selection)
+                return finish(False,
+                              "Surf favorite_previous failed (HTTP %d)" % code,
+                              code)
+            return finish(False, "Unsupported Surf action")
+        except (SurfError, JellyfinError) as ex:
+            return finish(False, str(ex))
+        except Exception as ex:
+            return finish(False, "Surf request failed (%s)" % type(ex).__name__)
+
+    def apply_surf_result(self, result):
+        if not isinstance(result, SurfResult):
+            return False
+        if not self.surf.is_current(result.generation, result.mode):
+            self.emit("surf_result_stale", {"action": result.action})
+            return False
+        if (result.action == "previous" and result.ok and
+                result.selection is not None):
+            if not self.surf.apply_selection(
+                    result.generation, result.mode, result.selection):
+                return False
+            self.ui.set_surf_selection(result.selection)
+        self._surf_feedback(result.message, result.ok)
+        return True
+
     def begin(self, probe):
         try:
             item = self.selected()
@@ -267,6 +431,7 @@ class Ps3Lab:
             else "")
         if not probe:
             self.ui.show_player(item)
+        self._surf_attach_session()
         quality = self.ui.quality_choice.get()
         requested_hd = video_mode(quality, hd=self.hd.get(),
                                    live=item.get("Type") == "TvChannel").height > 720
@@ -322,6 +487,7 @@ class Ps3Lab:
     def begin_stream(self, session, probe, hd, seeking=False):
         self._teardown(report_stop=not seeking)
         self.session = session
+        self._surf_attach_session()
         self.probe_stop = threading.Event()
         self.controller.configure(session.url, self.client.headers(), self.profile, hd,
                                   live=session.live)
@@ -462,6 +628,10 @@ class Ps3Lab:
             self.proxy = None
         if prior and report_stop and self.client:
             self.worker(self.send_playstate, prior, "stopped", prior_position, False)
+        self.surf.reset()
+        self.surf_busy = False
+        self._surf_active_request = 0
+        self.ui.hide_surf()
         self.summary.set("No active stream")
 
     def apply_switches(self):
@@ -559,6 +729,11 @@ class Ps3Lab:
                         request_id, session, probe, hd = result
                         if request_id == self.prepare_generation:
                             self.begin_stream(session, probe, hd)
+                    elif key == "surf_result":
+                        if result.request_id == self._surf_active_request:
+                            self._surf_active_request = 0
+                            self.surf_busy = False
+                        self.apply_surf_result(result)
                     elif key == "simulation":
                         self.emit("offline_simulation", result["simulation"])
                         self.status.set("Offline 20-second simulation complete")

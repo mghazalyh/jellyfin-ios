@@ -12,6 +12,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, replace
 from .parity import stream_query, video_mode
+from .surf import surf_url
 
 PS3_USER_AGENT = "JellyfinPS3/0.1"
 PS3_CLIENT = "PS3"
@@ -472,16 +473,49 @@ class JellyfinClient:
             body["LiveStreamId"] = session.live_stream_id
         return self.request(endpoints[action], "POST", body)
 
-    def surf_status(self, catalog_base: str, mode: str):
-        if mode not in ("all", "sports", "movies-series"):
-            raise ValueError("invalid Surf mode")
-        parsed = urllib.parse.urlsplit(catalog_base)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise JellyfinError("CatalogService URL invalid")
-        url = catalog_base.rstrip("/") + "/api/surf/" + mode
-        req = urllib.request.Request(url, headers=self.headers(), method="GET")
+    def surf_request(self, catalog_base: str, mode: str, action=None,
+                     payload=None, timeout=15):
+        """Send an authenticated CatalogService Surf request.
+
+        Returns (HTTP status, decoded JSON). Non-2xx responses are returned so
+        the caller can show the server-confirmed result instead of treating a
+        request as successful. The Jellyfin token is reused without logging or
+        rebasing it through another credential source.
+        """
+        url = surf_url(catalog_base, mode, action)
+        if not self.token:
+            raise JellyfinError("Jellyfin authentication unavailable")
+        data = None
+        headers = self.headers()
+        if action is not None:
+            data = json.dumps(payload if payload is not None else {},
+                              separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            url, data=data, headers=headers,
+            method="POST" if action is not None else "GET")
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                return json.load(response)
-        except (OSError, ValueError) as ex:
-            raise JellyfinError(f"Surf status request failed ({type(ex).__name__})") from ex
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                status = int(getattr(response, "status", None) or
+                             response.getcode())
+                body = response.read(1024 * 1024)
+        except urllib.error.HTTPError as ex:
+            # Do not read or log the error body; it can contain server detail.
+            return int(ex.code), {}
+        except (urllib.error.URLError, OSError, ValueError) as ex:
+            raise JellyfinError(
+                f"Surf connection error ({type(ex).__name__})") from ex
+        if status < 200 or status >= 300:
+            return status, {}
+        if not body:
+            return status, {}
+        try:
+            return status, json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as ex:
+            raise JellyfinError("Surf response was not JSON") from ex
+
+    def surf_status(self, catalog_base: str, mode: str):
+        status, payload = self.surf_request(catalog_base, mode)
+        if status != 200:
+            raise JellyfinError(f"Surf status HTTP {status}")
+        return payload

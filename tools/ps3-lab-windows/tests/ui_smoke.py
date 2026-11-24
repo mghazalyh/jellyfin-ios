@@ -35,6 +35,23 @@ EPISODE = {
     "RunTimeTicks": 18000000000,
     "ImageTags": {"Primary": "fixture"},
 }
+SURF = {
+    "Id": "surf-all", "Type": "TvChannel", "Name": "Surf: All Channels",
+    "ImageTags": {"Primary": "fixture"},
+}
+
+
+def widget_texts(widget):
+    found = []
+    for child in widget.winfo_children():
+        try:
+            text = child.cget("text")
+        except tk.TclError:
+            text = ""
+        if text:
+            found.append(text)
+        found.extend(widget_texts(child))
+    return found
 
 
 class Fixture:
@@ -118,6 +135,22 @@ def main():
         print("GUI_STAGE=return_home", flush=True)
         lab.ui.navigate("home")
         pump_until(root, lambda: not lab.ui.home_pending)
+        print("GUI_STAGE=surf_controls", flush=True)
+        lab.ui.show_player(SURF)
+        lab.ui.show_surf("all")
+        assert lab.ui.surf_panel.winfo_manager() == "pack"
+        labels = widget_texts(lab.ui.surf_panel)
+        for label in ("Pause Surf Looping", "Resume Surf Looping",
+                      "Favorite Current Channel", "Select Previous Channel",
+                      "Favorite Selected Previous", "Select Current Channel",
+                      "Show Surf Source Status"):
+            assert label in labels, label
+        lab.ui.set_surf_selection(type("Selection", (), {"source": "Fixture"})())
+        assert "Previous selection: Fixture" in lab.ui.surf_selection_text.get()
+        lab.ui.hide_surf()
+        assert lab.ui.surf_panel.winfo_manager() == ""
+        lab.ui.navigate("home")
+        pump_until(root, lambda: not lab.ui.home_pending)
         if sys.platform != "darwin":
             root.update_idletasks()
         print("GUI_STAGE=ready", flush=True)
@@ -139,7 +172,8 @@ def main():
         else:
             print("GUI_SCREENSHOT_SKIPPED=not_windows_ci", flush=True)
         assert not [e for e in lab.events if e["event"] == "ui_pump_error"]
-        print("GUI_SMOKE_PASS: home, cinematic backdrops, posters, episodes, video host")
+        print("GUI_SMOKE_PASS: home, cinematic backdrops, posters, episodes, "
+              "video host, Surf panel")
     finally:
         lab.close()
 

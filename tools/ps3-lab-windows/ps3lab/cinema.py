@@ -137,8 +137,76 @@ class CinematicUI(TheaterUI):
                  highlightthickness=0, troughcolor=BORDER).pack(side="left")
         self._btn(controls, "PS3 Diagnostics",
                   lambda: self.navigate("diagnostics")).pack(side="right")
-        self._label(parent, textvariable=self.lab.summary, size=9, color=MUTED).pack(
-            anchor="w", pady=(6, 2))
+        self._build_surf_controls(parent)
+        self.summary_label = self._label(parent, textvariable=self.lab.summary,
+                                         size=9, color=MUTED)
+        self.summary_label.pack(anchor="w", pady=(6, 2))
+
+    def _build_surf_controls(self, parent):
+        self.surf_mode = ""
+        self.surf_feedback_text = tk.StringVar(
+            value="Surf source status not requested")
+        self.surf_selection_text = tk.StringVar(
+            value="No previous channel selected")
+        self.surf_panel = tk.Frame(parent, bg=SURFACE)
+        header = tk.Frame(self.surf_panel, bg=SURFACE)
+        header.pack(fill="x", padx=12, pady=(7, 0))
+        self._label(header, "SURF LIVE TV", 9, ACCENT, True).pack(side="left")
+        self._label(header, "", 9, MUTED,
+                    textvariable=self.surf_selection_text).pack(
+                        side="left", padx=12)
+        self.surf_feedback_label = self._label(
+            self.surf_panel, "", 10, MUTED, textvariable=self.surf_feedback_text,
+            wraplength=1000, justify="left")
+        self.surf_feedback_label.pack(anchor="w", padx=12, pady=(4, 3))
+        buttons = tk.Frame(self.surf_panel, bg=SURFACE)
+        buttons.pack(fill="x", padx=12, pady=(0, 8))
+        for text, action in (
+            ("Pause Surf Looping", "pause"),
+            ("Resume Surf Looping", "resume"),
+            ("Favorite Current Channel", "favorite"),
+            ("Select Previous Channel", "previous"),
+            ("Favorite Selected Previous", "favorite_previous"),
+            ("Select Current Channel", "current"),
+            ("Show Surf Source Status", "status"),
+        ):
+            self._btn(buttons, text,
+                      lambda a=action: self.lab.surf_control(a)).pack(
+                          side="left", padx=(0, 5))
+        self.surf_panel.pack_forget()
+
+    def show_surf(self, mode):
+        self.surf_mode = mode or ""
+        self.surf_feedback_text.set(
+            "Surf controls active; source status not requested")
+        self.surf_selection_text.set("No previous channel selected")
+        self.surf_feedback_label.configure(fg=MUTED)
+        if not self.surf_panel.winfo_manager():
+            self.surf_panel.pack(fill="x", pady=(8, 0),
+                                 before=self.summary_label)
+
+    def hide_surf(self):
+        self.surf_mode = ""
+        if hasattr(self, "surf_panel"):
+            self.surf_panel.pack_forget()
+            self.surf_feedback_text.set("Surf source status not requested")
+            self.surf_selection_text.set("No previous channel selected")
+            self.surf_feedback_label.configure(fg=MUTED)
+
+    def set_surf_feedback(self, text, ok=False):
+        if hasattr(self, "surf_feedback_text"):
+            self.surf_feedback_text.set(text)
+            self.surf_feedback_label.configure(
+                fg=ACCENT if ok else "#ff8f8f")
+
+    def set_surf_selection(self, selection):
+        if not hasattr(self, "surf_selection_text"):
+            return
+        if selection is None:
+            self.surf_selection_text.set("Current channel selection")
+        else:
+            self.surf_selection_text.set(
+                "Previous selection: %s (playback unchanged)" % selection.source)
 
     def _scrub_start(self, _event):
         self._dragging = True

@@ -252,21 +252,20 @@ class NetworkShaper:
             }
 
 def av_sync_ms(video_pts, audio_pts):
-    """Signed A/V offset in milliseconds, tolerant of 33-bit PTS wrap.
+    """Signed observed A/V PTS offset in milliseconds over a 33-bit clock.
 
-    A small NEGATIVE delta (audio a few frames ahead) must stay negative.
-    Adding 1<<32 before the wrap check pushed such deltas just below the
-    threshold and reported ~47,721,840 ms (13.2 hours) instead of -18 ms.
+    This is a transport-level observation of the last PES PTS values, not
+    proof of rendered lip sync. The nearest modular difference is selected in
+    [-2**32, 2**32) so a small NEGATIVE delta (audio a few frames ahead) stays
+    negative and a genuine 33-bit rollover in either direction stays small
+    instead of reporting a ~13.2 hour offset. Missing values are ``None``;
+    a PTS of 0 is a real timestamp, not a missing one.
     """
     if video_pts is None or audio_pts is None:
         return None
-    diff = video_pts - audio_pts
     wrap = 1 << 33
     half = 1 << 32
-    if diff >= half:
-        diff -= wrap
-    elif diff <= -half:
-        diff += wrap
+    diff = ((video_pts - audio_pts + half) % wrap) - half
     return round(diff / 90.0, 2)
 
 
@@ -370,9 +369,21 @@ class TsInspector:
                         self.pcr_pid, self.pcr_first = pid, pcr
                     if self.pcr_pid == pid:
                         if self.pcr_last is not None and self.pcr_first is not None:
-                            if discontinuity or pcr < self.pcr_last or pcr - self.pcr_last > 900000:
+                            step = pcr - self.pcr_last
+                            if discontinuity:
                                 self.pcr_duration_ms += max(0, (self.pcr_last - self.pcr_first) // 90)
                                 self.pcr_first = pcr
+                            else:
+                                # A 33-bit PCR base rolls over from near 2**33
+                                # to zero. Treat that large backward step as a
+                                # forward rollover, not as a discontinuity.
+                                if step <= -(1 << 32):
+                                    pcr += ((self.pcr_last - pcr + (1 << 32))
+                                            // (1 << 33)) * (1 << 33)
+                                    step = pcr - self.pcr_last
+                                if step < 0 or step > 900000:
+                                    self.pcr_duration_ms += max(0, (self.pcr_last - self.pcr_first) // 90)
+                                    self.pcr_first = pcr
                         self.pcr_last = pcr
             off = 5 + length
         cc = p[3] & 15

@@ -34,6 +34,12 @@ VIDEO_PES_MAX = 1536 * 1024 + 64 * 1024
 AUDIO_PES_MAX = 64 * 1024
 SOURCE_GATE_MAX_MS = 3000
 LIVE_RESERVE_SECONDS = (4, 8, 15)
+# A retry probability is calibrated per 64-packet transport read (12,032 B).
+# Catch-up bursts may reach the 802.11b physical rate but never exceed it.
+RETRY_PAUSE_REFERENCE_BYTES = TS_PACKET_SIZE * 64
+WIFI_B_PHY_KBPS = 11000
+MAX_RETRY_DEBT_SECONDS = 30.0
+IDLE_DEBT_EXPIRY_SECONDS = 1.0
 
 @dataclass(frozen=True)
 class Profile:
@@ -199,12 +205,15 @@ class NetworkShaper:
         """Return seconds to sleep; deterministic for fixed input timestamps."""
         if count < 0:
             raise ValueError("negative byte count")
+        if count == 0:
+            return 0.0
         if not self.profile.simulate_wifi_b:
             return 0.0
         with self._lock:
             clock = time.monotonic() if now is None else now
             kbps = max(256, self.profile.effective_wifi_kbps)
             transmission = count * 8.0 / (kbps * 1000.0)
+            phy_transmission = count * 8.0 / (WIFI_B_PHY_KBPS * 1000.0)
             # One initial link RTT only. Applying a fresh 45ms on each
             # 12KB transport read would turn 2.5 Mbps into ~1.1 Mbps
             # and seriously misrepresent the intended stress profile.
@@ -213,16 +222,28 @@ class NetworkShaper:
                     -self.profile.jitter_ms, self.profile.jitter_ms)) / 1000.0
                 self._next_delivery = clock + max(0.0, initial)
                 self._initialized = True
+            # If the scheduled delivery is far in the past the reader went
+            # idle; a stale pause must not be charged to a later read. A long
+            # retry pause is not idleness: it leaves delivery in the future.
+            if (self._initialized and
+                    clock - self._next_delivery > IDLE_DEBT_EXPIRY_SECONDS):
+                self._retry_debt = 0.0
             self._next_delivery = max(clock, self._next_delivery) + transmission
             # Repay retry debt from previous stalls first so the declared
             # effective_wifi_kbps remains delivered payload goodput. A real
             # TCP retransmission produces a pause followed by a catch-up
             # burst; it does not silently halve the link's stated capacity.
-            repay = min(self._retry_debt, max(0.0, self._next_delivery - clock))
+            # The burst may reach the 802.11b physical rate, never exceed it.
+            repay_cap = max(0.0, self._next_delivery - clock - phy_transmission)
+            repay = min(self._retry_debt, repay_cap)
             self._next_delivery -= repay
             self._retry_debt -= repay
             extra = 0.0
-            if self._rng.random() < self.profile.retry_pause_probability:
+            # Retry probability is calibrated per 64-packet (12,032 B) read,
+            # so aggregate goodput does not depend on the caller's chunk size.
+            probability = min(1.0, self.profile.retry_pause_probability *
+                              count / RETRY_PAUSE_REFERENCE_BYTES)
+            if self._rng.random() < probability:
                 extra += self.profile.retry_pause_ms / 1000.0
                 self._retries += 1
             if self.profile.periodic_stall_seconds:
@@ -234,8 +255,12 @@ class NetworkShaper:
             if extra:
                 # Delay this chunk, and record the pause so later chunks are
                 # scheduled earlier (bounded) and repay the debt as a burst.
-                self._next_delivery += extra
-                self._retry_debt = min(30.0, self._retry_debt + extra)
+                # Pauses beyond the cap are not charged: the link cannot fall
+                # further behind, so it must not silently lose goodput either.
+                charged = min(extra, max(
+                    0.0, MAX_RETRY_DEBT_SECONDS - self._retry_debt))
+                self._next_delivery += charged
+                self._retry_debt += charged
             delay = max(0.0, self._next_delivery - clock)
             self._bytes += count
             self._delay_ms += delay * 1000.0

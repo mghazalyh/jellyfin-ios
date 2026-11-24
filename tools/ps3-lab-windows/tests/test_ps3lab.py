@@ -176,6 +176,16 @@ class Ps3ForkParityTests(unittest.TestCase):
             self.assertGreater(
                 shaper.stats()["simulated_wifi_retransmission_pauses"], 0)
 
+    def test_av_sync_keeps_small_negative_delta_negative(self):
+        from ps3lab.model import av_sync_ms
+        # Reproduced on real H.264/MP3 transport: video 1204322, audio
+        # 1206000 ticks used to be reported as 47721840.2 ms.
+        self.assertAlmostEqual(av_sync_ms(1204322, 1206000), -18.64, places=2)
+        self.assertAlmostEqual(av_sync_ms(1206000, 1204322), 18.64, places=2)
+        # Genuine 33-bit wrap: video just after zero, audio just before wrap.
+        self.assertAlmostEqual(av_sync_ms(100, (1 << 33) - 100), 2.22, places=2)
+        self.assertIsNone(av_sync_ms(None, 1))
+
     def test_ts_inspector_cc_and_split_chunks(self):
         tracker = TsInspector()
         data = pkt(0x101, 0) + pkt(0x101, 1) + pkt(0x101, 5) + pkt(0x1fff, 0)

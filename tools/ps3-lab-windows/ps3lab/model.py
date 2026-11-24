@@ -251,6 +251,25 @@ class NetworkShaper:
                 if self.profile.simulate_wifi_b else "no shaping",
             }
 
+def av_sync_ms(video_pts, audio_pts):
+    """Signed A/V offset in milliseconds, tolerant of 33-bit PTS wrap.
+
+    A small NEGATIVE delta (audio a few frames ahead) must stay negative.
+    Adding 1<<32 before the wrap check pushed such deltas just below the
+    threshold and reported ~47,721,840 ms (13.2 hours) instead of -18 ms.
+    """
+    if video_pts is None or audio_pts is None:
+        return None
+    diff = video_pts - audio_pts
+    wrap = 1 << 33
+    half = 1 << 32
+    if diff >= half:
+        diff -= wrap
+    elif diff <= -half:
+        diff += wrap
+    return round(diff / 90.0, 2)
+
+
 class TsInspector:
     """188-byte MPEG-TS framing, PAT/PMT, PCR, PES PTS and continuity tracker.
 
@@ -408,12 +427,7 @@ class TsInspector:
         pcr_ms = self.pcr_duration_ms
         if self.pcr_first is not None and self.pcr_last is not None:
             pcr_ms += max(0, (self.pcr_last - self.pcr_first) // 90)
-        av_ms = None
-        if self.video_pts is not None and self.audio_pts is not None:
-            diff = ((self.video_pts - self.audio_pts + (1 << 32)) % (1 << 33))
-            if diff >= (1 << 32):
-                diff -= 1 << 33
-            av_ms = round(diff / 90.0, 2)
+        av_ms = av_sync_ms(self.video_pts, self.audio_pts)
         return {
             "ts_packets": self.packets, "transport_bytes": self.bytes,
             "sync_skipped_bytes": self.sync_losses,

@@ -83,3 +83,21 @@ monotonic network stress effects. Stalled time now counts refreshes with
 a missed picture deadline, rather than harmless empty decode-ahead intervals
 while a picture is held. The stress inputs are synthetic and are not measured
 Cell, RSX or actual Wi-Fi performance.
+
+### Virtual endurance coverage
+
+`tests/test_virtual_endurance.py` adds bounded offline endurance runs for
+23.976, 24, 25, 29.97 and 30 fps in both VOD and Live TV. Each matrix case
+runs 1,800 virtual seconds (30 minutes) through the same deterministic
+`simulate_scenario` path as the 56-case matrix. A separate 900-second
+virtual network run drives `Ps3Pipeline` from deterministic `NetworkShaper`
+delivery delays at 0, 30 and 250 ms configured jitter, then checks the same
+ring, queue and stall bounds. Memory cases cover the packet-aligned 2 MiB
+floor, the 14 MiB-remaining request, and the 10 MiB live / 40 MiB VOD
+ceilings without claiming that any allocation occurred.
+
+The endurance tests assert only modeled values. They confirm that every
+per-step metric uses the `simulated_` prefix and that the report keeps
+`physical_allocation_measured` and `hardware_emulator` false. A PASS means
+the Python model stayed bounded and deterministic; it is not a PS3 soak,
+memory measurement, or Wi-Fi measurement.

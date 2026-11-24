@@ -131,8 +131,10 @@ class StreamController:
             self.closed.set()
             return True
 
-    def ingest(self, data: bytes):
+    def ingest(self, data: bytes, *, generation=None):
         with self._lock:
+            if generation is not None and not self.owns(generation):
+                return None
             now = time.monotonic()
             dt = max(0.0, min(60.0, now - (self._last_tick or now)))
             self._last_tick = now
@@ -238,8 +240,8 @@ class LocalProxy:
                                         break
                             if not owner._owns(generation):
                                 break
-                            wait = owner.controller.ingest(data)
-                            if not owner._owns(generation):
+                            wait = owner.controller.ingest(data, generation=generation)
+                            if wait is None or not owner._owns(generation):
                                 break
                             if wait and owner.controller.closed.wait(wait):
                                 break
@@ -280,7 +282,7 @@ class LocalProxy:
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     def _owns(self, generation):
-        return self.controller.owns(generation)
+        return generation == self.generation and not self._closed and self.controller.owns(generation)
 
     def _register(self, origin, generation):
         with self._active_lock:

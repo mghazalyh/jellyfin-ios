@@ -226,6 +226,29 @@ class ProxyLifecycleTests(unittest.TestCase):
         self.assertFalse(control.closed.is_set())
         self.assertEqual(control.stream_url, "http://127.0.0.1:1/two.ts")
 
+    def test_stale_proxy_rejects_new_requests_after_reconfigure(self):
+        fixture = self.make_fixture()
+        control, proxy = self.start_proxy(fixture.url)
+        control.configure(fixture.url, {}, self.profile, live=False)
+        for method in ("HEAD", "GET"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(urllib.request.Request(proxy.url, method=method), timeout=3)
+            try:
+                self.assertEqual(caught.exception.code, 503)
+            finally:
+                caught.exception.close()
+        self.assertFalse(fixture.first_written.is_set())
+        self.assertEqual(control._total_bytes, 0)
+
+    def test_ingest_rejects_stale_generation_under_lock(self):
+        control = StreamController(lambda *_: None)
+        control.configure("http://127.0.0.1:1/one.ts", {}, self.profile)
+        generation = control.generation
+        control.configure("http://127.0.0.1:1/two.ts", {}, self.profile)
+        self.assertIsNone(control.ingest(CHUNK, generation=generation))
+        self.assertEqual(control._total_bytes, 0)
+        self.assertEqual(self.packets(control), 0)
+
     def test_repeated_close_is_idempotent(self):
         control, proxy = self.start_proxy("http://127.0.0.1:1/fixture.ts")
         proxy.close()

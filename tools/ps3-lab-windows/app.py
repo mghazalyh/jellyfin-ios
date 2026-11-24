@@ -475,7 +475,7 @@ class Ps3Lab:
             f"802.11b effective {self.profile.effective_wifi_kbps}kb/s (only if enabled)\n"
             f"1080p: {m['decoded_slots']} decoded slots, "
             f"{m['decoded_reserved_bytes'] // 1048576} MiB YUV420, "
-            f"{m['live_ring_bytes'] // 1048576} MiB compressed live ring, "
+            f"{m['live_ring_bytes'] / 1048576:.2f} MiB assumed compressed live ring, "
             f"prefill {m['prefill_frames']} frames"
         )
         self.emit("stress_changed", {"cpu_rsx": self.cpu.get(), "wifi_b": self.wifi.get(),
@@ -492,7 +492,8 @@ class Ps3Lab:
         self.worker(lambda: ("simulation", simulate_scenario(
             profile, seconds=20, width=1920 if hd else 1280, height=1080 if hd else 720,
             bitrate_bps=8000000 if hd else 4000000,
-            input_bps=3000000 if profile.simulate_wifi_b else 10000000)))
+            input_bps=3000000 if profile.simulate_wifi_b else 10000000,
+            live=False)))
 
     def _render_event(self, event):
         self.events.append(event)
@@ -621,7 +622,7 @@ class Ps3Lab:
         if not path:
             return
         try:
-            report = simulate_scenario(self.profile, seconds=30)
+            report = simulate_scenario(self.profile, seconds=30, live=False)
             with open(path, "w", encoding="utf-8") as file:
                 json.dump(report, file, indent=2)
         except (OSError, ValueError) as ex:

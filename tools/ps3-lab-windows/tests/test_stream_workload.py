@@ -3,7 +3,10 @@ import unittest
 from dataclasses import replace
 
 from ps3lab.jellyfin import build_stream_url
-from ps3lab.model import Profile, RING_MAX, LIVE_RING_MAX, frame_buffer_bytes
+from ps3lab.model import (
+    Profile, RING_MAX, RING_MIN, LIVE_RING_MAX, TS_PACKET_SIZE,
+    assumed_ring_capacity_bytes, frame_buffer_bytes,
+)
 from ps3lab.proxy import StreamController, requested_stream_workload
 
 
@@ -38,7 +41,8 @@ class StreamWorkloadTests(unittest.TestCase):
         control.configure(self.url("360p"), {}, self.profile, live=False)
         model = control.pipeline
         self.assertEqual(model.budget["video_frame_bytes"], frame_buffer_bytes(640, 360))
-        self.assertEqual(model.step(0)["simulated_ring_capacity_bytes"], RING_MAX)
+        self.assertEqual(model.step(0)["simulated_ring_capacity_bytes"],
+                         assumed_ring_capacity_bytes(self.profile.free_xdr_mib, False))
         control.set_profile(Profile.from_switches(True, True, severe=True))
         self.assertIs(control.pipeline, model)
         self.assertEqual(control.profile.nominal_transport_bps, 700000)
@@ -47,8 +51,60 @@ class StreamWorkloadTests(unittest.TestCase):
         self.assertTrue(model.profile.simulate_cpu_gpu)
         control.configure(self.url("1080p25", hd=True, live=True), {}, self.profile, live=True)
         self.assertEqual(control.pipeline.budget["decoded_slots"], 8)
-        self.assertEqual(control.pipeline.step(0)["simulated_ring_capacity_bytes"], LIVE_RING_MAX)
+        self.assertEqual(control.pipeline.step(0)["simulated_ring_capacity_bytes"],
+                         assumed_ring_capacity_bytes(self.profile.free_xdr_mib, True))
         self.assertEqual(control.profile.nominal_transport_bps, 25000000)
+
+    def test_low_resolution_live_uses_1080p_reserved_slots(self):
+        control = StreamController(lambda *_: None)
+        control.configure(self.url("360p"), {}, self.profile, live=True)
+        pipe = control.pipeline
+        self.assertEqual((pipe.requested_width, pipe.requested_height), (640, 360))
+        self.assertEqual(pipe.budget["reserved_dimensions"], (1920, 1080))
+        self.assertEqual(pipe.budget["video_frame_bytes"], frame_buffer_bytes(1920, 1080))
+        self.assertEqual(pipe.budget["decoded_slots"], 8)
+        stats = pipe.step(0)
+        self.assertEqual((stats["simulated_requested_width"],
+                          stats["simulated_requested_height"]), (640, 360))
+        self.assertEqual((stats["simulated_reserved_width"],
+                          stats["simulated_reserved_height"]), (1920, 1080))
+        self.assertEqual(stats["simulated_ring_capacity_bytes"],
+                         assumed_ring_capacity_bytes(self.profile.free_xdr_mib, True))
+
+    def test_low_resolution_vod_keeps_requested_slots(self):
+        control = StreamController(lambda *_: None)
+        control.configure(self.url("360p"), {}, self.profile, live=False)
+        pipe = control.pipeline
+        self.assertEqual(pipe.budget["reserved_dimensions"], (640, 360))
+        self.assertEqual(pipe.budget["video_frame_bytes"], frame_buffer_bytes(640, 360))
+        self.assertEqual(pipe.budget["decoded_slots"], 24)
+        self.assertEqual(pipe.step(0)["simulated_ring_capacity_bytes"],
+                         assumed_ring_capacity_bytes(self.profile.free_xdr_mib, False))
+
+    def test_ring_capacities_are_packet_aligned_and_capped(self):
+        for live in (False, True):
+            with self.subTest(live=live):
+                ceiling = LIVE_RING_MAX if live else RING_MAX
+                low = assumed_ring_capacity_bytes(1, live)
+                high = assumed_ring_capacity_bytes(4096, live)
+                self.assertEqual(low, RING_MIN // TS_PACKET_SIZE * TS_PACKET_SIZE)
+                self.assertEqual(high, ceiling // TS_PACKET_SIZE * TS_PACKET_SIZE)
+                self.assertEqual(low % TS_PACKET_SIZE, 0)
+                self.assertEqual(high % TS_PACKET_SIZE, 0)
+
+    def test_fourteen_mib_post_frame_free_xdr_is_not_unconditional_vod_max(self):
+        free_mib = 14
+        expected = (free_mib * 1024 * 1024 // 4 * 3 // TS_PACKET_SIZE
+                    * TS_PACKET_SIZE)
+        budget = StreamController(lambda *_: None)
+        budget.configure(self.url("1080p", hd=True), {}, self.profile, live=False)
+        self.assertEqual(budget.pipeline.budget["assumed_post_frame_free_xdr_mib"],
+                         free_mib)
+        self.assertEqual(budget.pipeline.budget["assumed_vod_ring_capacity_bytes"],
+                         expected)
+        self.assertLess(expected, RING_MAX)
+        self.assertEqual(budget.pipeline.step(0)["simulated_ring_capacity_bytes"],
+                         expected)
 
     def test_explicit_low_quality_overrides_hd_toggle(self):
         w, h, profile = requested_stream_workload(
@@ -85,6 +141,18 @@ class StreamWorkloadTests(unittest.TestCase):
         self.assertTrue(sample["simulated_transport_rate_includes_audio"])
         self.assertFalse(sample["simulated_live"])
         self.assertEqual(sample["ts_packets"], 1)
+
+    def test_live_sample_keeps_requested_dimensions_separate_from_reserved(self):
+        events = []
+        control = StreamController(lambda name, values: events.append((name, values)))
+        control.configure(self.url("360p"), {}, self.profile, live=True)
+        control.ingest(bytes([0x47, 0x1f, 0xff, 0x10]) + bytes(184))
+        sample = next(v for n, v in events if n == "sample")
+        self.assertEqual(sample["simulated_requested_width"], 640)
+        self.assertEqual(sample["simulated_requested_height"], 360)
+        self.assertEqual(sample["simulated_reserved_width"], 1920)
+        self.assertEqual(sample["simulated_reserved_height"], 1080)
+        self.assertTrue(sample["simulated_live"])
 
 
 if __name__ == "__main__":

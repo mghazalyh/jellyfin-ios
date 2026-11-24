@@ -4,8 +4,10 @@ from urllib.parse import parse_qs, urlsplit
 from ps3lab.jellyfin import JellyfinClient, PlaybackSession, build_stream_url, ps3_device_profile
 from ps3lab.model import (
     Profile, NetworkShaper, Ps3Pipeline, TsInspector,
-    frame_buffer_bytes, jitter_slots, live_buffer_target,
-    ps3_memory_budget, simulate_scenario,
+    LIVE_RING_MAX, RING_MAX, RING_MIN, TS_PACKET_SIZE,
+    assumed_ring_capacity_bytes, frame_buffer_bytes, jitter_slots,
+    live_buffer_target, ps3_memory_budget, reserved_dimensions,
+    simulate_scenario,
 )
 from ps3lab.sourcegate import SurfAudioGate, is_scene_cut, sequence_reached
 
@@ -129,6 +131,24 @@ class Ps3ForkParityTests(unittest.TestCase):
         self.assertEqual(full["prefill_frames"], 8)
         self.assertLessEqual(full["live_ring_bytes"], 10 * 1024 * 1024)
         self.assertEqual(live_buffer_target(4000000, 2000, 8), 1800)
+
+    def test_memory_budget_rejects_invalid_dimensions_and_free_xdr(self):
+        for live in (False, True):
+            for dims in ((0, 360), (640, 0), (4097, 1), (1, 2161)):
+                with self.subTest(live=live, dims=dims):
+                    with self.assertRaises(ValueError):
+                        reserved_dimensions(*dims, live=live)
+            for free in (-1, 14.5):
+                with self.subTest(live=live, free=free):
+                    with self.assertRaises(ValueError):
+                        assumed_ring_capacity_bytes(free, live=live)
+
+    def test_memory_budget_uses_packet_floor_for_low_memory(self):
+        for live in (False, True):
+            capacity = assumed_ring_capacity_bytes(0, live=live)
+            self.assertEqual(capacity, (RING_MIN // TS_PACKET_SIZE) * TS_PACKET_SIZE)
+            ceiling = LIVE_RING_MAX if live else RING_MAX
+            self.assertLessEqual(assumed_ring_capacity_bytes(100, live), ceiling)
 
     def test_wifi_simulates_retries_without_corrupting_ts(self):
         mode = Profile.from_switches(False, True)

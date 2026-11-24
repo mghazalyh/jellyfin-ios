@@ -2,15 +2,19 @@
 
 References in mghazalyh/JellyFin-PS3 tag v3.6.5-surf.1:
 video.h (188-byte TS packets, 8/24 YUV420 slots, prefill min(12, cap)),
+core/player.cpp (Live TV reserves at least 1920x1080 decoded slots),
+threads/player_threads.cpp (2-40 MiB packet-aligned read-ahead),
 core/live_buffer.h (4/8/15 s reserve, 10 MiB live ring),
-threads/player_threads.cpp (2-40 MiB read-ahead, live 10 MiB),
 core/player_display.cpp (duration-consumption, RSX sync and flips),
 surf_gate_logic.h (scene-cut thresholds; 3 s safety recovery in surf_sync.cpp).
 RPCS3: RSXThread.cpp, RSXFIFO.cpp, cellAudio.cpp and cellVideoOut.cpp.
 
 This is intentionally NOT cycle-accurate RSX/Cell emulation. Measurements
 emitted by this simulator are always named simulated_*, and physical metrics
-are never invented. Pure Python for reproducible GitHub-hosted test runs.
+are never invented. Ring capacities are modeled assumptions derived from the
+source's requested allocation; they are neither physical allocation
+measurements nor proof that an allocation succeeded. Pure Python for
+reproducible GitHub-hosted test runs.
 """
 from __future__ import annotations
 
@@ -24,6 +28,8 @@ TS_PACKET_SIZE = 188
 LIVE_RING_MAX = 10 * 1024 * 1024
 RING_MIN = 2 * 1024 * 1024
 RING_MAX = 40 * 1024 * 1024
+LIVE_RESERVED_WIDTH = 1920
+LIVE_RESERVED_HEIGHT = 1080
 VIDEO_PES_MAX = 1536 * 1024 + 64 * 1024
 AUDIO_PES_MAX = 64 * 1024
 SOURCE_GATE_MAX_MS = 3000
@@ -89,22 +95,85 @@ def live_buffer_target(bits_per_second: int, capacity_packets: int, seconds: int
     maximum = capacity_packets - capacity_packets // 10
     return min(maximum, max(1, packets))
 
-def ps3_memory_budget(width: int, height: int, free_xdr_mib: int = 14) -> dict:
-    """Model reserved allocations; never represent actual free physical RAM."""
-    slot = frame_buffer_bytes(width, height)
-    count = jitter_slots(width, height)
+def reserved_dimensions(width: int, height: int, live: bool) -> tuple[int, int]:
+    """Decoded-slot dimensions requested for a mode, matching player.cpp.
+
+    Live TV allocates at least 1920x1080 decoded slots regardless of the
+    request's MaxWidth/MaxHeight. VOD keeps the requested dimensions.
+    """
+    # Validate the request before applying the live reservation floor.
+    frame_buffer_bytes(width, height)
+    if live and width * height < LIVE_RESERVED_WIDTH * LIVE_RESERVED_HEIGHT:
+        return LIVE_RESERVED_WIDTH, LIVE_RESERVED_HEIGHT
+    return width, height
+
+def assumed_ring_capacity_bytes(free_xdr_mib: int, live: bool) -> int:
+    """Model the packet-aligned compressed ring request for a mode.
+
+    The player asks for three quarters of the XDR available after decoded
+    frames, clamped to 10 MiB live or 40 MiB VOD and the 2 MiB floor, then
+    floors to whole 188-byte packets. The result is an assumed capacity, not
+    a physical allocation measurement or a guarantee that allocation succeeds.
+    """
+    if not isinstance(free_xdr_mib, int) or free_xdr_mib < 0:
+        raise ValueError("free XDR must be a nonnegative integer MiB")
+    ceiling = LIVE_RING_MAX if live else RING_MAX
+    requested = (free_xdr_mib * 1024 * 1024 // 4) * 3
+    requested = min(ceiling, requested)
+    if requested < RING_MIN:
+        requested = RING_MIN
+    return requested // TS_PACKET_SIZE * TS_PACKET_SIZE
+
+def ps3_memory_budget(width: int, height: int, free_xdr_mib: int = 14,
+                      live: bool = True) -> dict:
+    """Model reserved allocations and assumed ring capacity for one mode.
+
+    ``free_xdr_mib`` is assumed free XDR AFTER decoded-frame reservation,
+    because that is the point at which player.cpp takes the ring from
+    meminfo. Neither the frame reservation nor the ring capacity is a
+    physical allocation measurement, and a modeled request is not an
+    allocation success. Decoded reservation is the nominal slot-size total;
+    previously cached larger allocations can occupy additional XDR.
+    """
+    vod_dims = reserved_dimensions(width, height, live=False)
+    live_dims = reserved_dimensions(width, height, live=True)
+    reserved_w, reserved_h = live_dims if live else vod_dims
+    slot = frame_buffer_bytes(reserved_w, reserved_h)
+    count = jitter_slots(reserved_w, reserved_h)
     reserve = count * slot
-    # The compressed ring gets three quarters of free memory after frame reservation.
-    proposed = max(RING_MIN, free_xdr_mib * 1024 * 1024 * 3 // 4)
-    ring = min(LIVE_RING_MAX, RING_MAX, proposed)
+    live_ring = assumed_ring_capacity_bytes(free_xdr_mib, live=True)
+    vod_ring = assumed_ring_capacity_bytes(free_xdr_mib, live=False)
+    ring = live_ring if live else vod_ring
+    free_bytes = free_xdr_mib * 1024 * 1024
     return {
+        "mode": "live" if live else "vod",
+        "requested_width": width, "requested_height": height,
+        "reserved_width": reserved_w, "reserved_height": reserved_h,
+        "reserved_dimensions": (reserved_w, reserved_h),
+        "live_reserved_dimensions": live_dims,
+        "vod_reserved_dimensions": vod_dims,
+        "live_reserved_width": live_dims[0], "live_reserved_height": live_dims[1],
+        "vod_reserved_width": vod_dims[0], "vod_reserved_height": vod_dims[1],
         "video_frame_bytes": slot, "decoded_slots": count,
-        "decoded_reserved_bytes": reserve, "live_ring_bytes": ring,
-        "live_ring_packets": ring // TS_PACKET_SIZE,
+        "decoded_reserved_bytes": reserve,
         "prefill_frames": min(12, count),
+        "assumed_ring_capacity_bytes": ring,
+        "assumed_ring_packets": ring // TS_PACKET_SIZE,
+        "assumed_live_ring_capacity_bytes": live_ring,
+        "assumed_live_ring_packets": live_ring // TS_PACKET_SIZE,
+        "assumed_vod_ring_capacity_bytes": vod_ring,
+        "assumed_vod_ring_packets": vod_ring // TS_PACKET_SIZE,
+        # Preserve the earlier public field names for live ring diagnostics.
+        "live_ring_bytes": live_ring,
+        "live_ring_packets": live_ring // TS_PACKET_SIZE,
+        "vod_ring_bytes": vod_ring,
+        "vod_ring_packets": vod_ring // TS_PACKET_SIZE,
         "video_pes_buffer_bytes": VIDEO_PES_MAX,
         "audio_pes_buffer_bytes": AUDIO_PES_MAX,
+        "assumed_post_frame_free_xdr_mib": free_xdr_mib,
+        "assumed_post_frame_free_xdr_bytes": free_bytes,
         "assumed_remaining_xdr_mib": free_xdr_mib,
+        "physical_allocation_measured": False,
         "source": "v3.6.5-surf.1",
     }
 
@@ -357,8 +426,11 @@ class Ps3Pipeline:
     """
     def __init__(self, profile: Profile, width=1920, height=1080, live=True):
         self.profile = profile
-        self.budget = ps3_memory_budget(width, height, profile.free_xdr_mib)
         self.live = live
+        self.requested_width = width
+        self.requested_height = height
+        self.budget = ps3_memory_budget(
+            width, height, profile.free_xdr_mib, live=live)
         self._ring = 0.0
         self._frames = 0.0
         self._rsx_pending = deque()
@@ -383,7 +455,7 @@ class Ps3Pipeline:
             raise ValueError("invalid simulator step")
         self._at_ms += elapsed_ms
         self._input_bytes += received_bytes
-        ring_max = self.budget["live_ring_bytes"] if self.live else RING_MAX
+        ring_max = self.budget["assumed_ring_capacity_bytes"]
         offered = self._ring + received_bytes
         self._overflow_bytes += max(0.0, offered - ring_max)
         self._ring = min(ring_max, offered)
@@ -434,6 +506,11 @@ class Ps3Pipeline:
             "simulated_ring_bytes": round(self._ring),
             "simulated_ring_capacity_bytes": ring_max,
             "simulated_ring_overflow_bytes": round(self._overflow_bytes),
+            "simulated_mode": "live" if self.live else "vod",
+            "simulated_requested_width": self.requested_width,
+            "simulated_requested_height": self.requested_height,
+            "simulated_reserved_width": self.budget["reserved_width"],
+            "simulated_reserved_height": self.budget["reserved_height"],
             "simulated_decoder_frames": self._decoded,
             "simulated_presented_frames": self._displayed,
             "simulated_frame_queue": round(self._frames, 2),
@@ -453,11 +530,18 @@ class Ps3Pipeline:
         return dict(self._last_snapshot)
 
 def simulate_scenario(profile: Profile, seconds=20, bitrate_bps=4000000,
-                      input_bps=3000000, width=1920, height=1080) -> dict:
-    """Virtual-time deterministic offline simulation for GitHub CI."""
+                      input_bps=3000000, width=1920, height=1080,
+                      live=False) -> dict:
+    """Virtual-time deterministic OFFLINE simulation for GitHub CI.
+
+    This is not a live-server probe and emits no physical measurements. The
+    default VOD path keeps the requested dimensions so the quality ladder
+    (360p/720p/1080p) drives decoded-slot and ring behavior; pass live=True
+    to model a Live TV session's fixed 1920x1080 reservation.
+    """
     from dataclasses import replace
     p = replace(profile, stream_video_bps=bitrate_bps, stream_transport_bps=0)
-    engine = Ps3Pipeline(p, width=width, height=height)
+    engine = Ps3Pipeline(p, width=width, height=height, live=live)
     trace = []
     for index in range(int(seconds * 10)):
         # A reproducible transport burst/throughput source; no wallclock sleep.
@@ -472,6 +556,11 @@ def simulate_scenario(profile: Profile, seconds=20, bitrate_bps=4000000,
         "profile": asdict(p),
         "simulation": trace[-1] if trace else engine.step(0),
         "samples": [trace[i] for i in range(0, len(trace), 10)],
+        "simulation_mode": "offline_virtual_time",
+        "live": bool(live),
+        "requested_dimensions": (width, height),
+        "reserved_dimensions": engine.budget["reserved_dimensions"],
+        "physical_allocation_measured": False,
         "hardware_emulator": False,
         "reference": "mghazalyh/JellyFin-PS3 v3.6.5-surf.1",
     }

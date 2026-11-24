@@ -57,3 +57,21 @@ allowance. Unknown passthrough audio remains an incomplete estimate, not a
 measured bitrate. Stress toggles retain the request's workload; live and VOD
 use their distinct modeled compressed-buffer caps. These are request ceilings
 and assumptions, not decoded frame dimensions or real console measurements.
+
+### Memory and display cadence fidelity
+
+The console's Live TV path reserves 1920x1080 frame slots even when a
+lower stream resolution is requested. The VOD path uses the requested
+dimensions. These are nominal slot reservations: previously cached larger
+buffers can occupy additional XDR. The modeled ring uses three quarters of
+assumed available XDR after the frame reservation, packet-aligned, with
+2 MiB nominal minimum and 10 MiB live / 40 MiB VOD maxima. Allocation
+success is not measured by the model. At an assumed 14 MiB remaining,
+the ring request is approximately 10.5 MiB VOD or 10 MiB live.
+
+The display model carries fractional frame duration between vblanks, matching
+the console's duration-consumption gate at 59.94 Hz. It limits outstanding
+display debt during starvation. The earlier model rounded 24 fps down to
+about 20 fps. All prior simulated timing numbers are provisional until
+recomputed using the corrected cadence and memory model. These are still
+modeled results, not physical console performance measurements.

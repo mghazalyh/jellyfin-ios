@@ -132,6 +132,8 @@ class StreamController:
                 snap.update(model_stats)
                 snap.update(simulated_requested_width=self.requested_width,
                             simulated_requested_height=self.requested_height,
+                            simulated_reserved_width=self.pipeline.budget["reserved_width"],
+                            simulated_reserved_height=self.pipeline.budget["reserved_height"],
                             simulated_requested_video_bps=self.profile.stream_video_bps,
                             simulated_nominal_transport_bps=self.profile.nominal_transport_bps,
                             simulated_transport_rate_includes_audio=bool(self.profile.stream_transport_bps),

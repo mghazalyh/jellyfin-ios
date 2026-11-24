@@ -50,6 +50,12 @@ class Profile:
     stream_video_bps: int = 4000000
     free_xdr_mib: int = 14
     seed: int = 31
+    # Optional requested multiplexed rate, not a measured actual rate.
+    stream_transport_bps: int = 0
+
+    @property
+    def nominal_transport_bps(self):
+        return self.stream_transport_bps or self.stream_video_bps
 
     @classmethod
     def from_switches(cls, cpu_gpu: bool, wifi_b: bool, severe: bool = False):
@@ -386,7 +392,7 @@ class Ps3Pipeline:
         effective_decode = max(0.5, self.profile.cpu_decode_ms)
         self._decode_credit_ms = min(500.0, self._decode_credit_ms + elapsed_ms)
         self._present_credit_ms += elapsed_ms
-        nominal_bytes_per_frame = max(1, self.profile.stream_video_bps / 8.0 /
+        nominal_bytes_per_frame = max(1, self.profile.nominal_transport_bps / 8.0 /
                                       max(1.0, self.profile.video_fps))
         cap = self.budget["decoded_slots"]
         while (self._decode_credit_ms >= effective_decode and
@@ -450,7 +456,7 @@ def simulate_scenario(profile: Profile, seconds=20, bitrate_bps=4000000,
                       input_bps=3000000, width=1920, height=1080) -> dict:
     """Virtual-time deterministic offline simulation for GitHub CI."""
     from dataclasses import replace
-    p = replace(profile, stream_video_bps=bitrate_bps)
+    p = replace(profile, stream_video_bps=bitrate_bps, stream_transport_bps=0)
     engine = Ps3Pipeline(p, width=width, height=height)
     trace = []
     for index in range(int(seconds * 10)):

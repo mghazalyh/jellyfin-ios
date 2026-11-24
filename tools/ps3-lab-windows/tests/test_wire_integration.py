@@ -269,7 +269,7 @@ class PS3WireContract(unittest.TestCase):
         events = []
         control = StreamController(lambda name, data: events.append((name, data)))
         control.configure(session.url, self.client.headers(),
-                          Profile.from_switches(False, False))
+                          Profile.from_switches(False, False), live=session.live)
         relay = LocalProxy(control)
         relay.start()
         try:

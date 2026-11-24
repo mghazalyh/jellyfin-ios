@@ -188,7 +188,8 @@ def read_transport(client: JellyfinClient, session, result: Checks,
     events: list = []
     ctl = StreamController(lambda event, values: events.append(
         (str(event)[:30], type(values).__name__)))
-    ctl.configure(session.url, client.headers(), Profile.from_switches(False, False))
+    ctl.configure(session.url, client.headers(), Profile.from_switches(False, False),
+                  live=session.live)
     proxy = LocalProxy(ctl)
     try:
         proxy.start()

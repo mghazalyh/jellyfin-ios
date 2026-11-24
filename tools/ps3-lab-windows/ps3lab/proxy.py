@@ -5,6 +5,8 @@ URL, NEVER a Jellyfin token or password. Transport data is passed unmodified
 unless the operator explicitly enables the separate corruption test.
 """
 from __future__ import annotations
+from dataclasses import replace
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -13,6 +15,39 @@ import secrets
 import threading
 import time
 from .model import NetworkShaper, Profile, Ps3Pipeline, TsInspector
+from .parity import TS_OVERHEAD_PERCENT
+
+
+def requested_stream_workload(url, profile, hd=False):
+    """Derive model ceilings from the request, never from assumed decoded media.
+
+    Audio passthrough has no explicit rate, so its transport estimate remains
+    incomplete. A fixture without PS3 query fields retains its supplied profile.
+    """
+    try:
+        query = parse_qs(urlsplit(url).query, max_num_fields=128)
+    except ValueError:
+        query = {}
+
+    def positive_int(key, fallback, maximum):
+        try:
+            values = query.get(key, [])
+            value = int(values[0]) if len(values) == 1 else 0
+            return value if 0 < value <= maximum else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    width = positive_int('MaxWidth', 1920 if hd else 1280, 4096)
+    height = positive_int('MaxHeight', 1080 if hd else 720, 2160)
+    video = positive_int('VideoBitrate', profile.stream_video_bps, 100000000)
+    audio = positive_int('AudioBitrate', 0, 10000000)
+    payload_percent = 100 - TS_OVERHEAD_PERCENT
+    transport = (
+        ((video + audio) * 100 + payload_percent - 1) // payload_percent
+        if audio else profile.stream_transport_bps
+    )
+    return width, height, replace(profile, stream_video_bps=video,
+                                  stream_transport_bps=transport)
 
 class StreamController:
     def __init__(self, emit):
@@ -20,6 +55,9 @@ class StreamController:
         self._emit = emit
         self.profile = Profile.from_switches(False, False)
         self.hd = False
+        self.requested_width = 1920
+        self.requested_height = 1080
+        self._configured = False
         self.stream_url = ""
         self.headers = {}
         self.suspended = threading.Event()
@@ -32,16 +70,18 @@ class StreamController:
         self._total_bytes = 0
         self._frame_pacing_tail = 0.0
 
-    def configure(self, url: str, headers: dict, profile: Profile, hd=False):
+    def configure(self, url: str, headers: dict, profile: Profile, hd=False, *, live=True):
         with self._lock:
             self.stream_url = url
             self.headers = dict(headers)
-            self.profile = profile
+            width, height, workload = requested_stream_workload(url, profile, hd)
+            self.requested_width, self.requested_height = width, height
+            self._configured = True
+            self.profile = workload
             self.hd = hd
             self.inspector = TsInspector()
-            self.pipeline = Ps3Pipeline(profile, 1920 if hd else 1280,
-                                        1080 if hd else 720)
-            self._shaper = NetworkShaper(profile)
+            self.pipeline = Ps3Pipeline(workload, width, height, live=live)
+            self._shaper = NetworkShaper(workload)
             self._last_sample = 0.0
             self._last_tick = None
             self._total_bytes = 0
@@ -51,6 +91,9 @@ class StreamController:
 
     def set_profile(self, profile: Profile):
         with self._lock:
+            if self._configured:
+                profile = replace(profile, stream_video_bps=self.profile.stream_video_bps,
+                                  stream_transport_bps=self.profile.stream_transport_bps)
             if profile == self.profile:
                 return
             self.profile = profile
@@ -61,6 +104,8 @@ class StreamController:
 
     def stop(self):
         self.closed.set()
+        with self._lock:
+            self._configured = False
 
     def ingest(self, data: bytes):
         with self._lock:
@@ -74,7 +119,7 @@ class StreamController:
             # Optional CPU/RSX stress is APPLIED to the playback transport
             # *as a surrogate*. This cannot induce real RSX FIFO behavior on a PC.
             if self.profile.simulate_cpu_gpu:
-                nominal = max(1, self.profile.stream_video_bps / 8 /
+                nominal = max(1, self.profile.nominal_transport_bps / 8 /
                               max(1.0, self.profile.video_fps))
                 per_frame = max(0.0, self.profile.cpu_decode_ms +
                                 self.profile.rsx_upload_ms + self.profile.rsx_flip_ms -
@@ -85,6 +130,12 @@ class StreamController:
                 snap = {}
                 snap.update(self.inspector.snapshot())
                 snap.update(model_stats)
+                snap.update(simulated_requested_width=self.requested_width,
+                            simulated_requested_height=self.requested_height,
+                            simulated_requested_video_bps=self.profile.stream_video_bps,
+                            simulated_nominal_transport_bps=self.profile.nominal_transport_bps,
+                            simulated_transport_rate_includes_audio=bool(self.profile.stream_transport_bps),
+                            simulated_live=self.pipeline.live)
                 snap.update(self._shaper.stats())
                 self._emit("sample", snap)
             return delay

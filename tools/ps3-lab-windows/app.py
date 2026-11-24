@@ -323,7 +323,8 @@ class Ps3Lab:
         self._teardown(report_stop=not seeking)
         self.session = session
         self.probe_stop = threading.Event()
-        self.controller.configure(session.url, self.client.headers(), self.profile, hd)
+        self.controller.configure(session.url, self.client.headers(), self.profile, hd,
+                                  live=session.live)
         self.proxy = LocalProxy(self.controller)
         self.proxy.start()
         self.running = True

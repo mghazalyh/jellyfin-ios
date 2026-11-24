@@ -47,3 +47,13 @@ the desktop mpv client is not PS3 instruction-level emulation.
 The Jellyfin client and server/FFmpeg transcode pipeline are both adjustable.
 Use reproducible real-console evidence to choose minimal compatible changes
 on either side, and verify/rollback any production-server configuration change.
+
+## Requested workload accounting
+
+Runtime model dimensions follow the request's MaxWidth and MaxHeight, rather
+than a fixed 720p/1080p toggle. When both video and audio bitrate targets
+are available, the nominal multiplexed rate includes the reference 3% TS
+allowance. Unknown passthrough audio remains an incomplete estimate, not a
+measured bitrate. Stress toggles retain the request's workload; live and VOD
+use their distinct modeled compressed-buffer caps. These are request ceilings
+and assumptions, not decoded frame dimensions or real console measurements.
